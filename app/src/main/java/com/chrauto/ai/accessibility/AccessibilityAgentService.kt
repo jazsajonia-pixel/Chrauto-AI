@@ -61,6 +61,11 @@ class AccessibilityAgentService : AccessibilityService() {
 
     private fun find(id: String): AccessibilityNodeInfo? {
         val root = rootInActiveWindow ?: return null
-        return id.split('.').drop(1).fold(root) { node, part -> node?.getChild(part.toIntOrNull() ?: return null) }
+        var current: AccessibilityNodeInfo? = root
+        for (part in id.split('.').drop(1)) {
+            val index = part.toIntOrNull() ?: return null
+            current = current?.getChild(index)
+        }
+        return current
     }
 }
