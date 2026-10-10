@@ -10,7 +10,7 @@ The provider default is `gemini-3.8-flash`, selected because the current officia
 
 ## Build from a phone with GitHub Actions
 
-Push the repository to GitHub and open **Actions → Android Debug APK → Run workflow**. The workflow installs JDK 21 and Android API 36, runs `testDebugUnitTest`, builds `assembleDebug`, and uploads `app-debug.apk` as the `chrauto-ai-debug-apk` artifact. Download the artifact from the successful run, then install the APK on the Android phone. The local sandbox did not have an Android SDK or Gradle installation at implementation time, so the cloud workflow is the authoritative build path.
+Push the repository to GitHub and open **Actions → Android Debug APK → Run workflow**. The workflow installs JDK 21 and Android API 36, runs `testDebugUnitTest`, builds `assembleDebug`, and uploads `app-debug.apk` as the `chrauto-ai-debug-apk` artifact. The app uses Compose BOM 2026.06.00 because the newer 2026.09 BOM requires compile SDK 37, which was not available from the GitHub runner SDK repository during this build. Download the artifact from the successful run, then install the APK on the Android phone. The local sandbox did not have an Android SDK or Gradle installation at implementation time, so the cloud workflow is the authoritative build path.
 
 ## Phone setup
 
