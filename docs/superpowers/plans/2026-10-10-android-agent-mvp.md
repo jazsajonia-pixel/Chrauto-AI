@@ -6,7 +6,7 @@
 
 **Architecture:** A single Android app module uses Jetpack Compose for the control UI, a process-safe `AgentRuntime` state holder, a `GeminiProvider` adapter using HTTPS REST, a typed action protocol with local validation, and an `AccessibilityService` bridge exposing current tree snapshots and serialized actions. The first vertical slice supports observe, open app, tap, type text, scroll, back, wait, ask_user, finish, and report_error; the model never receives shell or unrestricted system authority.
 
-**Tech Stack:** Kotlin 2.4.10, Android Gradle Plugin 9.4.0, compile/target SDK 37, min SDK 26, Jetpack Compose BOM 2026.09.00, Material 3, Kotlin coroutines, AndroidX lifecycle/activity, Gemini Developer API `gemini-3.8-flash` with JSON-schema structured output.
+**Tech Stack:** Kotlin 2.4.10, Android Gradle Plugin 9.4.0, compile/target SDK 36 (API 37 was not available from the GitHub runner's SDK repository), min SDK 26, Jetpack Compose BOM 2026.09.00, Material 3, Kotlin coroutines, AndroidX lifecycle/activity, Gemini Developer API `gemini-3.8-flash` with JSON-schema structured output.
 
 **Spec:** `MANUS_BUILD_PROMPT.md`, `DEVELOPMENT_PHASES.md`
 
