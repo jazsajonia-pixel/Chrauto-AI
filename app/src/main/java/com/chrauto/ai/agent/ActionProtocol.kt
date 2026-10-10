@@ -54,11 +54,15 @@ data class UiObservation(
 object ActionValidator {
     fun validate(action: AgentAction, observation: UiObservation?): String? = when (action) {
         is AgentAction.OpenApp -> if (!Regex("^[a-zA-Z][a-zA-Z0-9_.]{2,}$").matches(action.packageName)) "Invalid package name" else null
-        is AgentAction.Tap -> node(observation, action.nodeId)?.let { if (!it.enabled || !it.clickable) "Target is not enabled and clickable" else null } ?: "Target node is stale or missing"
+        is AgentAction.Tap -> when (val target = node(observation, action.nodeId)) {
+            null -> "Target node is stale or missing"
+            else -> if (!target.enabled || !target.clickable) "Target is not enabled and clickable" else null
+        }
         is AgentAction.TypeText -> when {
             action.text.length > MAX_TEXT_LENGTH -> "Text exceeds $MAX_TEXT_LENGTH characters"
             action.text.contains('\u0000') -> "Text contains an invalid character"
-            node(observation, action.nodeId)?.let { !it.enabled || !it.editable } != false -> "Target is not an enabled editable field"
+            node(observation, action.nodeId)?.let { !it.enabled || !it.editable } == true -> "Target is not an enabled editable field"
+            node(observation, action.nodeId) == null -> "Target node is stale or missing"
             else -> null
         }
         is AgentAction.Scroll -> if (action.nodeId == null || node(observation, action.nodeId)?.scrollable == true) null else "Scroll target is stale or not scrollable"

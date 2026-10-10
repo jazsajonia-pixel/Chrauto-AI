@@ -3,6 +3,9 @@ package com.chrauto.ai.provider
 import com.chrauto.ai.agent.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -71,17 +74,18 @@ class GeminiProvider(
 
 object ActionPlanParser {
     fun parse(raw: String): ActionPlan {
-        val json = JSONObject(raw.trim().removePrefix("```").removeSuffix("```").trim())
-        return ActionPlan(when (json.getString("action")) {
-            "open_app" -> AgentAction.OpenApp(json.getString("package_name"))
-            "tap" -> AgentAction.Tap(json.getString("node_id"))
-            "type_text" -> AgentAction.TypeText(json.getString("node_id"), json.getString("text"))
-            "scroll" -> AgentAction.Scroll(json.optString("node_id").takeIf { it.isNotBlank() }, Direction.valueOf(json.getString("direction")))
+        val json = Json.parseToJsonElement(raw.trim().removePrefix("```").removeSuffix("```").trim()).jsonObject
+        fun value(name: String): String = json[name]?.jsonPrimitive?.content ?: error("Missing $name")
+        return ActionPlan(when (value("action")) {
+            "open_app" -> AgentAction.OpenApp(value("package_name"))
+            "tap" -> AgentAction.Tap(value("node_id"))
+            "type_text" -> AgentAction.TypeText(value("node_id"), value("text"))
+            "scroll" -> AgentAction.Scroll(json["node_id"]?.jsonPrimitive?.content?.takeIf { it.isNotBlank() }, Direction.valueOf(value("direction")))
             "press_back" -> AgentAction.PressBack
-            "wait" -> AgentAction.Wait(json.getLong("milliseconds"))
-            "ask_user" -> AgentAction.AskUser(json.getString("reason"))
-            "finish" -> AgentAction.Finish(json.getString("summary"), json.getString("evidence"))
-            "report_error" -> AgentAction.ReportError(json.getString("message"))
+            "wait" -> AgentAction.Wait(value("milliseconds").toLong())
+            "ask_user" -> AgentAction.AskUser(value("reason"))
+            "finish" -> AgentAction.Finish(value("summary"), value("evidence"))
+            "report_error" -> AgentAction.ReportError(value("message"))
             else -> error("Unsupported action")
         })
     }
