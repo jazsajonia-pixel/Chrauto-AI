@@ -22,6 +22,8 @@ jobs:
           java-version: '21'
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
       - name: Install Android SDK platform
         run: sdkmanager "platforms;android-37" "build-tools;37.0.0"
       - name: Run unit tests
