@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Chrauto AI</string>
+    <string name="accessibility_service_description">Allows Chrauto AI to read visible accessibility information and perform user-approved UI actions. It does not bypass protected fields or permission dialogs.</string>
+</resources>
