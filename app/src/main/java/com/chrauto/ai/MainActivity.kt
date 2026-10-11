@@ -32,7 +32,7 @@ typealias RunTask = suspend (task: String, apiKey: String, model: String, onStat
 fun ChrautoScreen(
     onOpenAccessibility: () -> Unit,
     runTask: RunTask = { task, apiKey, model, onState ->
-        AgentOrchestrator(GeminiProvider(apiKey.trim(), model.trim()), AccessibilityBridge, onState).run(task)
+        AgentOrchestrator(GeminiProvider(apiKey.trim(), model.trim()), AccessibilityBridge, onState = onState).run(task)
     }
 ) {
     val scope = rememberCoroutineScope()
