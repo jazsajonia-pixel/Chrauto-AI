@@ -29,7 +29,7 @@ class SelfTestReceiver : BroadcastReceiver() {
 
                 // 1) Tap a label inside a clickable row after the layout shifted (stale node path).
                 var obs = AccessibilityBridge.observe()
-                val label = obs?.nodes?.firstOrNull { it.text == "Open row label" }
+                val label = obs?.nodes?.firstOrNull { it.text.equals("Open row label", ignoreCase = true) }
                 lab.insertBanner(); delay(600)
                 val tap = label?.let { AccessibilityBridge.execute(AgentAction.Tap(it.id)) }
                 delay(500)
@@ -37,7 +37,7 @@ class SelfTestReceiver : BroadcastReceiver() {
 
                 // 2) Tap a button in the bottom corner, under where the floating bubble sits.
                 obs = AccessibilityBridge.observe()
-                val corner = obs?.nodes?.firstOrNull { it.text == "Corner button" }
+                val corner = obs?.nodes?.firstOrNull { it.text.equals("Corner button", ignoreCase = true) || it.contentDescription.equals("Corner button", ignoreCase = true) }
                 val tap2 = corner?.let { AccessibilityBridge.execute(AgentAction.Tap(it.id)) }
                 delay(500)
                 report("tap_under_bubble", lab.status.text == "Corner tapped", "result=${tap2?.message} status=${lab.status.text}")
