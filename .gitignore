@@ -2,6 +2,7 @@
 /build/
 */build/
 artifacts/
+artifacts-ui/
 local.properties
 *.iml
 .idea/
