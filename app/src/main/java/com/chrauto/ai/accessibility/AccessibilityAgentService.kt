@@ -46,7 +46,7 @@ class AccessibilityAgentService : AccessibilityService() {
         when (action) {
             is AgentAction.OpenApp -> runCatching { startActivity(packageManager.getLaunchIntentForPackage(action.packageName)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: error("App not installed")); ActionResult(true, "Opened ${action.packageName}") }.getOrElse { ActionResult(false, it.message ?: "Could not open app") }
             is AgentAction.Tap, is AgentAction.TypeText, is AgentAction.Scroll, AgentAction.PressBack ->
-                AccessibilityActionExecutor(::find, ::performGlobalAction).execute(action)
+                AccessibilityActionExecutor({ id -> find(id)?.let(::AccessibilityNodeInfoTarget) }, ::performGlobalAction).execute(action)
             is AgentAction.Wait -> {
                 kotlinx.coroutines.delay(action.milliseconds)
                 ActionResult(true, "Wait completed")

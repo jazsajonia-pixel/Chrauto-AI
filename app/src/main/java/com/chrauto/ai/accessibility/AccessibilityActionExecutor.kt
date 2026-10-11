@@ -4,9 +4,22 @@ import android.os.Bundle
 import android.view.accessibility.AccessibilityNodeInfo
 import com.chrauto.ai.agent.*
 
+interface AccessibilityNodeTarget {
+    val isEnabled: Boolean
+    val isEditable: Boolean
+    fun performAction(action: Int, arguments: Bundle? = null): Boolean
+}
+
+class AccessibilityNodeInfoTarget(private val node: AccessibilityNodeInfo) : AccessibilityNodeTarget {
+    override val isEnabled get() = node.isEnabled
+    override val isEditable get() = node.isEditable
+    override fun performAction(action: Int, arguments: Bundle?): Boolean =
+        if (arguments == null) node.performAction(action) else node.performAction(action, arguments)
+}
+
 /** Executes only the semantic actions authorized by the agent protocol. */
 class AccessibilityActionExecutor(
-    private val findNode: (String) -> AccessibilityNodeInfo?,
+    private val findNode: (String) -> AccessibilityNodeTarget?,
     private val performGlobalAction: (Int) -> Boolean
 ) {
     fun execute(action: AgentAction): ActionResult = when (action) {
