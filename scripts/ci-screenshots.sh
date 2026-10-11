@@ -17,10 +17,12 @@ DENS=$(adb shell wm density | grep -o '[0-9]*' | tail -1)
 X=$(( W - 47 * DENS / 160 )); Y=$(( H - 76 * DENS / 160 ))
 adb shell input tap $X $Y; sleep 2
 adb exec-out screencap -p > "$OUT/03-panel-expanded.png"
-adb shell am broadcast -n $PKG/.debug.DemoReceiver; sleep 1.5
+adb shell am broadcast -n $PKG/.debug.DemoReceiver; sleep 1.2
 adb exec-out screencap -p > "$OUT/04-cursor-thinking.png"
-sleep 1.6
+sleep 1.9
 adb exec-out screencap -p > "$OUT/05-cursor-moving.png"
+sleep 0.5
+adb exec-out screencap -p > "$OUT/05b-cursor-tap.png"
 sleep 5
 adb exec-out screencap -p > "$OUT/06-done.png"
 adb shell am start -n $PKG/.MainActivity; sleep 3

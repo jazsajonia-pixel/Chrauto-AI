@@ -293,9 +293,9 @@ private fun SetupCard(
                     }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                StepRow(2, "Accessibility service", if (accessibilityEnabled) "On — I can read and tap the screen" else "Turn on \"Chrauto AI Accessibility\"", accessibilityEnabled) {
+                StepRow(2, "Accessibility service", if (accessibilityEnabled) "On — I can read and tap the screen" else "Enable \"Chrauto AI Accessibility\" in Settings", accessibilityEnabled) {
                     FilledTonalButton(onClick = onOpenAccessibility, modifier = Modifier.testTag("accessibilityButton"), shape = RoundedCornerShape(12.dp)) {
-                        Text(if (accessibilityEnabled) "Manage" else "Open Accessibility Settings", fontSize = 13.sp)
+                        Text(if (accessibilityEnabled) "Manage" else "Turn on", fontSize = 13.sp)
                     }
                 }
                 StepRow(3, "Microphone", if (micGranted) "Voice commands ready" else "Needed for voice commands", micGranted) {
@@ -360,7 +360,7 @@ private fun StatusCard(state: AgentState) {
         AnimatedVisibility(state.status == RunStatus.RUNNING) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
-                    (if (state.step > 0) "Step ${state.step} · " else "") + state.detail.ifBlank { "Working…" },
+                    (if (state.step > 0 && (state.phase == AgentPhase.MOVING || state.phase == AgentPhase.ACTING)) "Step ${state.step} · " else "") + state.detail.ifBlank { "Working…" },
                     style = MaterialTheme.typography.bodyMedium, color = Brand.Violet, maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
                 LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Brand.Violet, trackColor = Brand.VioletSoft)

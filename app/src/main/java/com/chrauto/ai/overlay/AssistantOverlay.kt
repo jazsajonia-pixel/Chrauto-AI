@@ -174,6 +174,8 @@ class AssistantOverlay(private val context: Context) {
             speakIfEnabled("On it!")
         }
         if (previous.status == RunStatus.RUNNING && state.status != RunStatus.RUNNING) {
+            // Keep the footprint small: tuck the panel away a few seconds after a run ends.
+            handler.removeCallbacks(autoCollapse); handler.postDelayed(autoCollapse, 4_500)
             when (state.status) {
                 RunStatus.SUCCEEDED -> { flashMood(Mood.HAPPY); speakIfEnabled("All done! ${state.detail}") }
                 RunStatus.FAILED -> { flashMood(Mood.SAD); speakIfEnabled("Sorry, I got stuck.") }
@@ -202,7 +204,7 @@ class AssistantOverlay(private val context: Context) {
         }
         setStatus(statusOverride ?: when {
             listening -> "Listening… tell me what to do"
-            running -> (if (s.step > 0) "Step ${s.step} · " else "") + s.detail.ifBlank { "Working…" }
+            running -> (if (s.step > 0 && (s.phase == AgentPhase.MOVING || s.phase == AgentPhase.ACTING)) "Step ${s.step} · " else "") + s.detail.ifBlank { "Working…" }
             s.status == RunStatus.SUCCEEDED -> "Done: ${s.detail}"
             s.status == RunStatus.FAILED -> "Stuck: ${s.detail}"
             s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs you: ${s.detail}"
@@ -221,6 +223,7 @@ class AssistantOverlay(private val context: Context) {
         }
         statusText.text = text
     }
+    private val autoCollapse = Runnable { if (lastState.status != RunStatus.RUNNING && !listening) collapse() }
     private val clearOverride = Runnable { statusOverride = null; refresh() }
 
     private fun flashMood(mood: Mood) {
