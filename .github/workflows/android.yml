@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -28,6 +28,8 @@ jobs:
         run: sdkmanager "platforms;android-36" "build-tools;36.0.0"
       - name: Run unit tests
         run: ./gradlew testDebugUnitTest
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
       - name: Enable KVM for the Android emulator
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
@@ -40,7 +42,9 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: pixel_7_pro
-          script: ./gradlew connectedDebugAndroidTest --stacktrace --info
+          script: |
+            ./gradlew connectedDebugAndroidTest --stacktrace
+            bash scripts/ci-screenshots.sh
       - name: Upload instrumentation reports
         if: always()
         uses: actions/upload-artifact@v4
@@ -50,11 +54,26 @@ jobs:
             app/build/outputs/androidTest-results/connected/**
             app/build/reports/androidTests/connected/**
           if-no-files-found: warn
-      - name: Build debug APK
-        run: ./gradlew assembleDebug
+      - name: Upload UI screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: screenshots/
+          if-no-files-found: warn
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
           name: chrauto-ai-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+      - name: Publish APK to the latest-debug GitHub release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk chrauto-ai-debug.apk
+          gh release delete latest-debug --yes --cleanup-tag || true
+          gh release create latest-debug chrauto-ai-debug.apk --prerelease --target "${GITHUB_SHA}" \
+            --title "Chrauto AI (latest debug build)" \
+            --notes "Automatic debug APK built from ${GITHUB_SHA}. Unit and instrumentation tests passed before publishing."

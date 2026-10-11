@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performScrollTo
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.chrauto.ai.agent.AgentLog
 import com.chrauto.ai.agent.AgentState
@@ -26,9 +27,9 @@ class MainActivityUiTest {
     @get:Rule val compose = createComposeRule()
 
     @Test fun runIsDisabledUntilApiKeyIsProvided() {
-        compose.setContent { ChrautoScreen(onOpenAccessibility = {}, runTask = { _, _, _, _ -> }) }
+        compose.setContent { ChrautoScreen(onOpenAccessibility = {}, runTask = { _, _, _, _ -> }, observeController = false) }
         compose.onNodeWithTag("runButton").assertIsNotEnabled()
-        compose.onNodeWithTag("apiKeyInput").performTextInput("test-key")
+        compose.onNodeWithTag("apiKeyInput").performScrollTo().performTextInput("test-key")
         compose.onNodeWithTag("runButton").assertIsEnabled()
     }
 
@@ -36,16 +37,17 @@ class MainActivityUiTest {
         compose.setContent {
             ChrautoScreen(
                 onOpenAccessibility = {},
+                observeController = false,
                 runTask = { _, _, _, onState ->
                     onState(AgentState(RunStatus.RUNNING, listOf(AgentLog("Observed test screen"))))
                     onState(AgentState(RunStatus.SUCCEEDED, listOf(AgentLog("Verified test result"))))
                 }
             )
         }
-        compose.onNodeWithTag("apiKeyInput").performTextInput("test-key")
-        compose.onNodeWithTag("runButton").performClick()
+        compose.onNodeWithTag("apiKeyInput").performScrollTo().performTextInput("test-key")
+        compose.onNodeWithTag("runButton").performScrollTo().performClick()
         compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: SUCCEEDED").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Status: SUCCEEDED").assertIsDisplayed()
+        compose.onNodeWithText("Status: SUCCEEDED").performScrollTo().assertIsDisplayed()
     }
 
     @Test fun stopCancelsAnActiveRunAndReportsCancellation() {
@@ -53,6 +55,7 @@ class MainActivityUiTest {
         compose.setContent {
             ChrautoScreen(
                 onOpenAccessibility = {},
+                observeController = false,
                 runTask = { _, _, _, onState ->
                     started.set(true)
                     onState(AgentState(RunStatus.RUNNING, listOf(AgentLog("Running"))))
@@ -60,18 +63,18 @@ class MainActivityUiTest {
                 }
             )
         }
-        compose.onNodeWithTag("apiKeyInput").performTextInput("test-key")
-        compose.onNodeWithTag("runButton").performClick()
+        compose.onNodeWithTag("apiKeyInput").performScrollTo().performTextInput("test-key")
+        compose.onNodeWithTag("runButton").performScrollTo().performClick()
         compose.waitUntil(2_000) { started.get() }
-        compose.onNodeWithTag("stopButton").assertIsEnabled().performClick()
+        compose.onNodeWithTag("stopButton").performScrollTo().assertIsEnabled().performClick()
         compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: CANCELLED").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Status: CANCELLED").assertIsDisplayed()
+        compose.onNodeWithText("Status: CANCELLED").performScrollTo().assertIsDisplayed()
     }
 
     @Test fun accessibilitySetupCallbackIsInvoked() {
         val opened = AtomicBoolean(false)
-        compose.setContent { ChrautoScreen(onOpenAccessibility = { opened.set(true) }, runTask = { _, _, _, _ -> }) }
-        compose.onNodeWithTag("accessibilityButton").performClick()
+        compose.setContent { ChrautoScreen(onOpenAccessibility = { opened.set(true) }, runTask = { _, _, _, _ -> }, observeController = false) }
+        compose.onNodeWithTag("accessibilityButton").performScrollTo().performClick()
         assertTrue(opened.get())
     }
 }

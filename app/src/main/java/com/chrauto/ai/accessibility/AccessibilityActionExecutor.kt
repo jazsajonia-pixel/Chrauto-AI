@@ -35,8 +35,9 @@ class AccessibilityActionExecutor(
         } ?: ActionResult(false, "Text target missing")
         is AgentAction.Scroll -> findNode(action.nodeId ?: "0")?.let { node ->
             val scrollAction = when (action.direction) {
-                Direction.UP, Direction.RIGHT -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
-                Direction.DOWN, Direction.LEFT -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
+                // DOWN/RIGHT reveal content further along the list (forward); UP/LEFT go back.
+                Direction.DOWN, Direction.RIGHT -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD
+                Direction.UP, Direction.LEFT -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD
             }
             ActionResult(node.performAction(scrollAction), "Scroll dispatched")
         } ?: ActionResult(false, "Scroll target missing")

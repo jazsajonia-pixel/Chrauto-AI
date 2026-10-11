@@ -18,3 +18,17 @@ class ActionPlanParserTest {
         ActionPlanParser.parse("not json")
     }
 }
+
+class GeminiSchemaTest {
+    @Test fun schemaUsesOpenApiNullableInsteadOfTypeArrays() {
+        val schema = com.chrauto.ai.provider.GeminiProvider("k").schema().toString()
+        assertFalse(schema.contains("[Ljava"))
+        assertFalse(schema.contains("\"type\":["))
+        assertTrue(schema.contains("\"nullable\":true"))
+    }
+
+    @Test fun parserTreatsJsonNullAsMissing() {
+        val plan = ActionPlanParser.parse("{\"action\":\"scroll\",\"node_id\":null,\"direction\":\"DOWN\",\"text\":null}")
+        assertEquals(AgentAction.Scroll(null, Direction.DOWN), plan.action)
+    }
+}

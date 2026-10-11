@@ -13,63 +13,153 @@ interface DeviceBridge {
 }
 
 enum class RunStatus { IDLE, RUNNING, SUCCEEDED, FAILED, CANCELLED, NEEDS_ASSISTANCE }
-data class AgentLog(val message: String, val isError: Boolean = false)
-data class AgentState(val status: RunStatus = RunStatus.IDLE, val logs: List<AgentLog> = emptyList(), val task: String = "")
+
+/** Fine-grained activity used by the floating assistant to animate. */
+enum class AgentPhase { IDLE, OBSERVING, THINKING, MOVING, ACTING, DONE }
+
+data class AgentLog(val message: String, val isError: Boolean = false, val atMillis: Long = System.currentTimeMillis())
+data class AgentState(
+    val status: RunStatus = RunStatus.IDLE,
+    val logs: List<AgentLog> = emptyList(),
+    val task: String = "",
+    val phase: AgentPhase = AgentPhase.IDLE,
+    val detail: String = "",
+    val target: TargetBox? = null,
+    val step: Int = 0
+)
 
 class AgentOrchestrator(
     private val provider: AiProvider,
     private val device: DeviceBridge,
-    private val maxActions: Int = 20,
-    private val maxRequests: Int = 20,
-    private val maxDurationMs: Long = 180_000,
+    private val maxActions: Int = 25,
+    private val maxRequests: Int = 30,
+    private val maxDurationMs: Long = 240_000,
+    private val maxConsecutiveFailures: Int = 3,
+    private val previewMs: Long = 700,
     private val onState: (AgentState) -> Unit
 ) {
     suspend fun run(task: String) {
         val started = System.currentTimeMillis()
-        var state = AgentState(RunStatus.RUNNING, listOf(AgentLog("Started: ${task.take(160)}")), task)
+        var state = AgentState(RunStatus.RUNNING, listOf(AgentLog("Started: ${task.take(160)}")), task, AgentPhase.OBSERVING, "Looking at the screen")
         onState(state)
-        fun log(message: String, error: Boolean = false) {
-            state = state.copy(logs = (state.logs + AgentLog(message, error)).takeLast(100))
-            onState(state)
-        }
+        fun update(transform: (AgentState) -> AgentState) { state = transform(state); onState(state) }
+        fun log(message: String, error: Boolean = false) = update { it.copy(logs = (it.logs + AgentLog(message, error)).takeLast(100)) }
+
         try {
-            if (!device.isReady()) throw IllegalStateException("Accessibility Service is disabled. Enable it in Android Settings first.")
+            if (!device.isReady()) throw IllegalStateException("Accessibility Service is disabled. Enable Chrauto AI in Android Settings → Accessibility first.")
             var observation = device.observe() ?: throw IllegalStateException("No accessible active window is available.")
             var actions = 0
             var requests = 0
+            var consecutiveFailures = 0
+            val history = mutableListOf<String>()
             val fingerprints = mutableMapOf<String, Int>()
+
+            fun reject(reason: String) {
+                consecutiveFailures++
+                history += "REJECTED: $reason"
+                log("Retrying: $reason", true)
+                if (consecutiveFailures >= maxConsecutiveFailures) throw IllegalStateException("Stopped after repeated problems: $reason")
+            }
+
             while (actions < maxActions && requests < maxRequests && System.currentTimeMillis() - started < maxDurationMs) {
                 coroutineContext.ensureActive()
                 log("Observed ${observation.nodes.size} accessible nodes in ${observation.packageName ?: "unknown app"}.")
-                val plan = provider.plan(task, observation).getOrElse { throw it }
+                update { it.copy(phase = AgentPhase.THINKING, detail = "Thinking…", target = null) }
+                val plan = provider.plan(task, observation, history).getOrElse { throw it }
                 requests++
+                plan.thought?.let { log(it) }
+
                 if (SafetyPolicy.requiresConfirmation(task, plan.action)) {
-                    log("Paused: confirmation required before a consequential action.")
-                    state = state.copy(status = RunStatus.NEEDS_ASSISTANCE); onState(state); return
+                    val reason = (plan.action as? AgentAction.AskUser)?.reason ?: "This task may send, buy, delete, or submit something."
+                    log("Paused: $reason")
+                    update { it.copy(status = RunStatus.NEEDS_ASSISTANCE, phase = AgentPhase.DONE, detail = reason, target = null) }
+                    return
                 }
-                if (plan.action is AgentAction.Finish) {
-                    val finish = plan.action as AgentAction.Finish
-                    val evidencePresent = observation.compactText().contains(finish.evidence, ignoreCase = true)
-                    if (!evidencePresent) { log("Model requested success, but evidence was not present in the current observation.", true); throw IllegalStateException("Completion could not be verified") }
-                    state = state.copy(status = RunStatus.SUCCEEDED); onState(state); return
+                when (val action = plan.action) {
+                    is AgentAction.Finish -> {
+                        val ok = action.evidence.isNotBlank() && observation.compactText().contains(action.evidence, ignoreCase = true)
+                        if (ok) {
+                            log("Done: ${action.summary}")
+                            update { it.copy(status = RunStatus.SUCCEEDED, phase = AgentPhase.DONE, detail = action.summary, target = null) }
+                            return
+                        }
+                        reject("finish evidence \"${action.evidence.take(80)}\" is not visible on the current screen")
+                        continue
+                    }
+                    is AgentAction.ReportError -> throw IllegalStateException(action.message)
+                    else -> Unit
                 }
-                ActionValidator.validate(plan.action, observation)?.let { throw IllegalArgumentException(it) }
-                log("Executing ${plan.action::class.simpleName}.")
-                val result = device.execute(plan.action)
+
+                val resolved = resolve(plan.action, observation)
+                val problem = ActionValidator.validate(resolved, observation)
+                if (problem != null) { reject("${describe(resolved, observation)} — $problem"); continue }
+
+                val label = describe(resolved, observation)
+                val box = targetFor(resolved, observation)
+                update { it.copy(phase = AgentPhase.MOVING, detail = label, target = box, step = actions + 1) }
+                if (box != null) delay(previewMs)
+                update { it.copy(phase = AgentPhase.ACTING) }
+                log("Step ${actions + 1}: $label")
+                val result = device.execute(resolved)
                 actions++
-                if (!result.ok) throw IllegalStateException(result.message)
-                delay(if (plan.action is AgentAction.Wait) 100 else 350)
+                if (!result.ok) { reject("$label failed: ${result.message}"); delay(400); observation = device.observe() ?: observation; continue }
+                consecutiveFailures = 0
+                history += "$label → ok"
+
+                update { it.copy(phase = AgentPhase.OBSERVING, detail = "Checking the result") }
+                delay(if (resolved is AgentAction.Wait) 150 else if (resolved is AgentAction.OpenApp) 1_200 else 600)
                 observation = device.observe() ?: throw IllegalStateException("The screen could not be observed after the action.")
-                val fingerprint = observation.compactText().hashCode().toString() + ":" + plan.action::class.simpleName
-                fingerprints[fingerprint] = (fingerprints[fingerprint] ?: 0) + 1
-                if (fingerprints[fingerprint]!! >= 3) throw IllegalStateException("Repeated action produced no verified progress; stopped safely.")
+                val fingerprint = observation.compactText().hashCode().toString() + ":" + label
+                val seen = (fingerprints[fingerprint] ?: 0) + 1
+                fingerprints[fingerprint] = seen
+                if (seen >= 3) throw IllegalStateException("Repeated the same action without progress; stopped safely.")
+                if (seen == 2) history += "NOTE: the screen did not change after \"$label\"; try something else."
             }
             throw IllegalStateException("Execution limit reached before verified completion.")
         } catch (cancelled: CancellationException) {
-            state = state.copy(status = RunStatus.CANCELLED); onState(state); throw cancelled
+            update { it.copy(status = RunStatus.CANCELLED, phase = AgentPhase.DONE, detail = "Stopped", target = null) }
+            throw cancelled
         } catch (error: Exception) {
             log(error.message ?: "Unknown failure", true)
-            state = state.copy(status = RunStatus.FAILED); onState(state)
+            update { it.copy(status = RunStatus.FAILED, phase = AgentPhase.DONE, detail = error.message ?: "Failed", target = null) }
+        }
+    }
+
+    /** Re-target taps on labels to their clickable parent, and fill in a scroll container when omitted. */
+    private fun resolve(action: AgentAction, observation: UiObservation): AgentAction = when (action) {
+        is AgentAction.Tap -> observation.clickableTarget(action.nodeId)?.let { AgentAction.Tap(it.id) } ?: action
+        is AgentAction.Scroll -> if (action.nodeId == null || observation.node(action.nodeId)?.scrollable != true)
+            observation.nodes.firstOrNull { it.scrollable && it.enabled }?.let { AgentAction.Scroll(it.id, action.direction) } ?: action
+        else action
+        else -> action
+    }
+
+    private fun targetFor(action: AgentAction, observation: UiObservation): TargetBox? {
+        val id = when (action) {
+            is AgentAction.Tap -> action.nodeId
+            is AgentAction.TypeText -> action.nodeId
+            is AgentAction.Scroll -> action.nodeId
+            else -> null
+        } ?: return null
+        val b = observation.node(id)?.bounds ?: return null
+        if (b.right <= b.left || b.bottom <= b.top) return null
+        return TargetBox(b.left, b.top, b.right, b.bottom)
+    }
+
+    private fun describe(action: AgentAction, observation: UiObservation): String {
+        fun name(id: String?) = id?.let { observation.node(it) }?.let { n ->
+            (n.text?.takeIf { it.isNotBlank() } ?: n.contentDescription?.takeIf { it.isNotBlank() } ?: n.hint ?: n.className?.substringAfterLast('.'))?.take(40)
+        } ?: id ?: "screen"
+        return when (action) {
+            is AgentAction.OpenApp -> "Open ${action.packageName}"
+            is AgentAction.Tap -> "Tap \"${name(action.nodeId)}\""
+            is AgentAction.TypeText -> "Type \"${action.text.take(40)}\""
+            is AgentAction.Scroll -> "Scroll ${action.direction.name.lowercase()}"
+            AgentAction.PressBack -> "Go back"
+            is AgentAction.Wait -> "Wait ${action.milliseconds} ms"
+            is AgentAction.AskUser -> "Ask user"
+            is AgentAction.Finish -> "Finish"
+            is AgentAction.ReportError -> "Report error"
         }
     }
 }

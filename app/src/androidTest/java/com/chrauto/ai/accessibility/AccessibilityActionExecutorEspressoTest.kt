@@ -55,7 +55,7 @@ class AccessibilityActionExecutorEspressoTest {
                         backCalled
                     }
                 )
-                assertTrue(executor.execute(AgentAction.Scroll("scroll", Direction.UP)).ok)
+                assertTrue(executor.execute(AgentAction.Scroll("scroll", Direction.DOWN)).ok)
                 assertTrue(executor.execute(AgentAction.PressBack).ok)
             }
         }

@@ -1,0 +1,403 @@
+package com.chrauto.ai.overlay
+
+import android.animation.ValueAnimator
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.PixelFormat
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import android.text.TextUtils
+import android.view.Gravity
+import android.view.MotionEvent
+import android.view.View
+import android.view.ViewConfiguration
+import android.view.WindowManager
+import android.view.animation.DecelerateInterpolator
+import android.view.animation.OvershootInterpolator
+import android.widget.FrameLayout
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.chrauto.ai.MainActivity
+import com.chrauto.ai.R
+import com.chrauto.ai.agent.AgentController
+import com.chrauto.ai.agent.AgentPhase
+import com.chrauto.ai.agent.AgentState
+import com.chrauto.ai.agent.RunStatus
+import com.chrauto.ai.data.SettingsStore
+import kotlin.math.abs
+import kotlin.math.hypot
+
+/**
+ * Floating assistant drawn as accessibility overlays (no extra "draw over apps" permission).
+ *
+ *  - Dock: a draggable mascot bubble at the bottom. Tapping it pops open a compact panel
+ *    (one status line + one row of buttons) so it never covers more than a thin strip of the screen.
+ *  - Cursor buddy: a non-touchable mini mascot that flies to whatever the agent is about to
+ *    tap/type/scroll and shows a loader while thinking.
+ *
+ * The agent acts through accessibility node actions, not screen-coordinate taps, so it can't
+ * "hit" these overlays by accident; the cursor window is also FLAG_NOT_TOUCHABLE.
+ */
+@SuppressLint("ClickableViewAccessibility", "SetTextI18n")
+class AssistantOverlay(private val context: Context) {
+    private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val handler = Handler(Looper.getMainLooper())
+    private val settings = SettingsStore(context)
+    private val density = context.resources.displayMetrics.density
+    private fun dp(v: Number) = (v.toFloat() * density).toInt()
+
+    private val speaker = Speaker(context)
+    private val voice = VoiceCommander(
+        context,
+        onListening = { listening -> this.listening = listening; refresh() },
+        onPartial = { partial -> setStatus("“$partial”") },
+        onResult = ::handleVoiceCommand,
+        onError = { message ->
+            setStatus(message); flashMood(Mood.SAD)
+            if (message.startsWith("Microphone")) openApp(requestMic = true)
+        }
+    )
+
+    private var listening = false
+    private var expanded = false
+    private var hidden = false
+    private var attached = false
+    private var lastState = AgentState()
+    private var statusOverride: String? = null
+    private var moodOverride: Mood? = null
+
+    // ---------- Dock ----------
+    private val bubble = MascotView(context).apply { contentDescription = "Chrauto assistant" }
+    private val statusText = TextView(context).apply {
+        textSize = 12.5f; setTextColor(MascotColors.INK); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setPadding(dp(4), 0, dp(4), dp(6))
+    }
+    private val micBtn = roundButton(R.drawable.ic_mic, "Voice command", MascotColors.VIOLET) { voice.toggle() }
+    private val stopBtn = roundButton(R.drawable.ic_stop, "Stop task", MascotColors.CORAL) { AgentController.stop(); speakIfEnabled("Okay, stopped.") }
+    private val retryBtn = roundButton(R.drawable.ic_replay, "Repeat last task", 0xFF4C9AFF.toInt()) { retryLast() }
+    private val appBtn = roundButton(R.drawable.ic_home, "Open Chrauto", 0xFF8E7CC3.toInt()) { openApp() }
+    private val hideBtn = roundButton(R.drawable.ic_close, "Hide assistant", 0xFF9AA0B4.toInt()) { hide() }
+    private val buttons = listOf(micBtn, stopBtn, retryBtn, appBtn, hideBtn)
+
+    private val panel = LinearLayout(context).apply {
+        orientation = LinearLayout.VERTICAL
+        background = GradientDrawable().apply {
+            cornerRadius = dp(24).toFloat(); setColor(0xF7FFFFFF.toInt()); setStroke(dp(1.5f), 0x337C5CFF)
+        }
+        elevation = dp(8).toFloat()
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        visibility = View.GONE
+        addView(statusText, LinearLayout.LayoutParams(dp(236), LinearLayout.LayoutParams.WRAP_CONTENT))
+        addView(LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            buttons.forEachIndexed { i, b ->
+                addView(b, LinearLayout.LayoutParams(dp(40), dp(40)).apply { if (i > 0) marginStart = dp(9) })
+            }
+        })
+    }
+    private val dock = LinearLayout(context).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.BOTTOM or Gravity.END
+        clipChildren = false; clipToPadding = false
+        setPadding(dp(6), dp(6), dp(6), dp(6))
+        addView(panel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
+        addView(bubble, LinearLayout.LayoutParams(dp(62), dp(62)))
+    }
+    private val dockParams = WindowManager.LayoutParams(
+        WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+        PixelFormat.TRANSLUCENT
+    ).apply { gravity = Gravity.BOTTOM or Gravity.END; x = dp(10); y = dp(28) }
+
+    // ---------- Cursor buddy ----------
+    private val cursorSize = dp(112)
+    private val cursor = CursorBuddyView(context)
+    private var cursorShown = false
+    private var cursorAnim: ValueAnimator? = null
+    private var lastTargetKey: String? = null
+    private val cursorParams = WindowManager.LayoutParams(
+        cursorSize, cursorSize,
+        WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
+        WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+        PixelFormat.TRANSLUCENT
+    ).apply {
+        gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+    }
+
+    init { setupBubbleTouch() }
+
+    fun attach() {
+        if (attached) return
+        runCatching { wm.addView(dock, dockParams) }.onSuccess { attached = true }
+        hidden = false
+        refresh()
+    }
+
+    fun detach() {
+        voice.cancel(); speaker.shutdown()
+        hideCursor(immediate = true)
+        if (attached) runCatching { wm.removeView(dock) }
+        attached = false
+        handler.removeCallbacksAndMessages(null)
+    }
+
+    fun show() { hidden = false; if (!attached) attach() else dock.visibility = View.VISIBLE; refresh() }
+
+    fun hide() {
+        voice.cancel()
+        collapse()
+        hidden = true
+        dock.animate().alpha(0f).scaleX(0.6f).scaleY(0.6f).setDuration(180).withEndAction {
+            if (hidden) dock.visibility = View.GONE
+            dock.alpha = 1f; dock.scaleX = 1f; dock.scaleY = 1f
+        }.start()
+    }
+
+    /** Called for every agent state change. */
+    fun render(state: AgentState) {
+        val previous = lastState
+        lastState = state
+        if (state.status == RunStatus.RUNNING && previous.status != RunStatus.RUNNING) {
+            statusOverride = null
+            if (hidden) show()
+            speakIfEnabled("On it!")
+        }
+        if (previous.status == RunStatus.RUNNING && state.status != RunStatus.RUNNING) {
+            when (state.status) {
+                RunStatus.SUCCEEDED -> { flashMood(Mood.HAPPY); speakIfEnabled("All done! ${state.detail}") }
+                RunStatus.FAILED -> { flashMood(Mood.SAD); speakIfEnabled("Sorry, I got stuck.") }
+                RunStatus.NEEDS_ASSISTANCE -> { flashMood(Mood.SAD); speakIfEnabled("I need your okay before I continue.") }
+                else -> Unit
+            }
+        }
+        updateCursor(state, previous)
+        refresh()
+    }
+
+    // ---------- Rendering ----------
+    private fun refresh() {
+        val s = lastState
+        val running = s.status == RunStatus.RUNNING
+        bubble.mood = moodOverride ?: when {
+            listening -> Mood.LISTENING
+            running && (s.phase == AgentPhase.MOVING || s.phase == AgentPhase.ACTING) -> Mood.WORKING
+            running -> Mood.THINKING
+            else -> Mood.IDLE
+        }
+        cursor.mood = when {
+            !running -> moodOverride ?: Mood.IDLE
+            s.phase == AgentPhase.THINKING || s.phase == AgentPhase.OBSERVING -> Mood.THINKING
+            else -> Mood.WORKING
+        }
+        setStatus(statusOverride ?: when {
+            listening -> "Listening… tell me what to do"
+            running -> (if (s.step > 0) "Step ${s.step} · " else "") + s.detail.ifBlank { "Working…" }
+            s.status == RunStatus.SUCCEEDED -> "Done: ${s.detail}"
+            s.status == RunStatus.FAILED -> "Stuck: ${s.detail}"
+            s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs you: ${s.detail}"
+            s.status == RunStatus.CANCELLED -> "Stopped. Tap the mic for a new task."
+            else -> "Hi! Tap the mic and tell me what to do."
+        }, override = false)
+        micBtn.tint(if (listening) MascotColors.PINK else MascotColors.VIOLET)
+        stopBtn.isEnabled = running; stopBtn.alpha = if (running) 1f else 0.35f
+        retryBtn.isEnabled = !running && settings.lastTask.isNotBlank(); retryBtn.alpha = if (retryBtn.isEnabled) 1f else 0.35f
+    }
+
+    private fun setStatus(text: String, override: Boolean = true) {
+        if (override) {
+            statusOverride = text
+            handler.removeCallbacks(clearOverride); handler.postDelayed(clearOverride, 4_000)
+        }
+        statusText.text = text
+    }
+    private val clearOverride = Runnable { statusOverride = null; refresh() }
+
+    private fun flashMood(mood: Mood) {
+        moodOverride = mood; refresh()
+        handler.removeCallbacks(clearMood); handler.postDelayed(clearMood, 2_600)
+    }
+    private val clearMood = Runnable { moodOverride = null; refresh() }
+
+    // ---------- Expand / collapse ----------
+    private fun toggle() = if (expanded) collapse() else expand()
+
+    private fun expand() {
+        if (expanded) return
+        expanded = true
+        boing()
+        panel.visibility = View.VISIBLE
+        panel.alpha = 0f; panel.scaleX = 0.4f; panel.scaleY = 0.7f
+        panel.post {
+            panel.pivotX = panel.width.toFloat(); panel.pivotY = panel.height.toFloat()
+            panel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(300).setInterpolator(OvershootInterpolator(1.4f)).start()
+        }
+        buttons.forEachIndexed { i, b ->
+            b.scaleX = 0f; b.scaleY = 0f
+            b.animate().scaleX(1f).scaleY(1f).setStartDelay(90L + i * 45L).setDuration(240).setInterpolator(OvershootInterpolator(2.2f)).start()
+        }
+        refresh()
+    }
+
+    private fun collapse() {
+        if (!expanded) return
+        expanded = false
+        boing()
+        panel.animate().alpha(0f).scaleX(0.4f).scaleY(0.7f).setDuration(180).setInterpolator(DecelerateInterpolator())
+            .withEndAction { if (!expanded) panel.visibility = View.GONE }.start()
+    }
+
+    private fun boing() {
+        bubble.animate().cancel()
+        bubble.scaleX = 1.18f; bubble.scaleY = 0.84f
+        bubble.animate().scaleX(1f).scaleY(1f).setDuration(420).setInterpolator(OvershootInterpolator(3f)).start()
+    }
+
+    private fun setupBubbleTouch() {
+        val slop = ViewConfiguration.get(context).scaledTouchSlop
+        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var dragging = false
+        bubble.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = e.rawX; downY = e.rawY; startX = dockParams.x; startY = dockParams.y; dragging = false
+                    v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).start(); true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - downX; val dy = e.rawY - downY
+                    if (!dragging && hypot(dx, dy) > slop) dragging = true
+                    if (dragging) {
+                        val metrics = context.resources.displayMetrics
+                        dockParams.x = (startX - dx.toInt()).coerceIn(0, metrics.widthPixels - dp(70))
+                        dockParams.y = (startY - dy.toInt()).coerceIn(0, metrics.heightPixels - dp(120))
+                        bubble.lookX = (-dx / 200f).coerceIn(-1f, 1f) * -1f; bubble.lookY = (dy / 200f).coerceIn(-1f, 1f)
+                        if (attached) runCatching { wm.updateViewLayout(dock, dockParams) }
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
+                    bubble.lookX = 0f; bubble.lookY = 0f
+                    if (!dragging && e.actionMasked == MotionEvent.ACTION_UP && abs(e.rawX - downX) < slop) { v.performClick(); toggle() }
+                    true
+                }
+                else -> false
+            }
+        }
+    }
+
+    // ---------- Cursor buddy ----------
+    private fun updateCursor(state: AgentState, previous: AgentState) {
+        val running = state.status == RunStatus.RUNNING
+        if (!running) {
+            lastTargetKey = null
+            if (cursorShown) { cursor.showReticle = false; handler.postDelayed({ if (lastState.status != RunStatus.RUNNING) hideCursor() }, 1_400) }
+            return
+        }
+        if (!cursorShown) showCursor()
+        val target = state.target
+        cursor.showReticle = target != null && (state.phase == AgentPhase.MOVING || state.phase == AgentPhase.ACTING)
+        if (target != null) {
+            val key = "${target.centerX},${target.centerY},${state.step}"
+            if (key != lastTargetKey) { lastTargetKey = key; moveCursorTo(target.centerX, target.centerY) }
+        }
+        if (state.phase == AgentPhase.ACTING && previous.phase != AgentPhase.ACTING && target != null) cursor.pulse()
+    }
+
+    private fun showCursor() {
+        val m = context.resources.displayMetrics
+        cursorParams.x = m.widthPixels / 2 - cursorSize / 2
+        cursorParams.y = (m.heightPixels * 0.45f).toInt() - cursorSize / 2
+        cursor.alpha = 0f; cursor.scaleX = 0.3f; cursor.scaleY = 0.3f
+        runCatching { wm.addView(cursor, cursorParams) }.onSuccess {
+            cursorShown = true
+            cursor.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).setInterpolator(OvershootInterpolator(1.8f)).start()
+        }
+    }
+
+    private fun hideCursor(immediate: Boolean = false) {
+        cursorAnim?.cancel()
+        if (!cursorShown) return
+        val remove = { if (cursorShown) { runCatching { wm.removeView(cursor) }; cursorShown = false } }
+        if (immediate) remove() else cursor.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setDuration(220).withEndAction(remove).start()
+    }
+
+    private fun moveCursorTo(cx: Int, cy: Int) {
+        if (!cursorShown) return
+        cursorAnim?.cancel()
+        val fromX = cursorParams.x; val fromY = cursorParams.y
+        val toX = cx - cursorSize / 2; val toY = cy - cursorSize / 2
+        val dx = (toX - fromX).toFloat(); val dy = (toY - fromY).toFloat()
+        val dist = hypot(dx, dy)
+        cursor.lookX = if (dist > 0) dx / dist else 0f; cursor.lookY = if (dist > 0) dy / dist else 0f
+        cursor.rotation = (dx / (dist + 1f)) * 12f
+        cursorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = (260 + dist / density * 0.9f).toLong().coerceIn(260, 620)
+            interpolator = DecelerateInterpolator(1.6f)
+            addUpdateListener {
+                val f = it.animatedValue as Float
+                // Slight arc so it "floats" rather than slides.
+                val lift = (dist * 0.12f * (4f * f * (1f - f))).toInt()
+                cursorParams.x = (fromX + dx * f).toInt(); cursorParams.y = (fromY + dy * f).toInt() - lift
+                if (cursorShown) runCatching { wm.updateViewLayout(cursor, cursorParams) }
+            }
+            doOnEndCompat { cursor.animate().rotation(0f).setDuration(200).start(); cursor.lookX = 0f; cursor.lookY = 0f }
+            start()
+        }
+    }
+
+    // ---------- Actions ----------
+    private fun handleVoiceCommand(text: String) {
+        val t = text.trim()
+        val lower = t.lowercase()
+        if (lower in setOf("stop", "cancel", "stop it", "stop task", "never mind", "nevermind")) {
+            AgentController.stop(); setStatus("Okay, stopped."); speakIfEnabled("Okay, stopped."); return
+        }
+        setStatus("“$t”")
+        val problem = AgentController.startWithSavedSettings(t)
+        if (problem != null) { setStatus(problem); flashMood(Mood.SAD); speakIfEnabled(problem) }
+    }
+
+    private fun retryLast() {
+        val task = settings.lastTask
+        if (task.isBlank()) { setStatus("No previous task yet"); return }
+        AgentController.startWithSavedSettings(task)?.let { setStatus(it); flashMood(Mood.SAD) }
+    }
+
+    private fun openApp(requestMic: Boolean = false) {
+        val intent = Intent(context, MainActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+            .putExtra(MainActivity.EXTRA_REQUEST_MIC, requestMic)
+        runCatching { context.startActivity(intent) }
+        collapse()
+    }
+
+    private fun speakIfEnabled(text: String) { if (settings.voiceReplies) speaker.say(text) }
+
+    private fun roundButton(icon: Int, label: String, color: Int, onClick: () -> Unit): ImageView = ImageView(context).apply {
+        setImageResource(icon)
+        contentDescription = label
+        scaleType = ImageView.ScaleType.CENTER
+        setPadding(dp(9), dp(9), dp(9), dp(9))
+        imageTintList = ColorStateList.valueOf(Color.WHITE)
+        background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
+        elevation = dp(2).toFloat()
+        setOnClickListener {
+            it.animate().scaleX(0.82f).scaleY(0.82f).setDuration(70).withEndAction {
+                it.animate().scaleX(1f).scaleY(1f).setDuration(160).setInterpolator(OvershootInterpolator(3f)).start()
+            }.start()
+            onClick()
+        }
+    }
+
+    private fun ImageView.tint(color: Int) { (background as? GradientDrawable)?.setColor(color) }
+}
