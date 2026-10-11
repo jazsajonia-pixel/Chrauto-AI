@@ -45,10 +45,8 @@ class AccessibilityAgentService : AccessibilityService() {
     suspend fun executeAction(action: AgentAction): ActionResult = withContext(Dispatchers.Main) {
         when (action) {
             is AgentAction.OpenApp -> runCatching { startActivity(packageManager.getLaunchIntentForPackage(action.packageName)?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK) ?: error("App not installed")); ActionResult(true, "Opened ${action.packageName}") }.getOrElse { ActionResult(false, it.message ?: "Could not open app") }
-            is AgentAction.Tap -> find(action.nodeId)?.let { ActionResult(it.performAction(AccessibilityNodeInfo.ACTION_CLICK), "Tap dispatched") } ?: ActionResult(false, "Tap target missing")
-            is AgentAction.TypeText -> find(action.nodeId)?.let { node -> val args = Bundle().apply { putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, action.text) }; ActionResult(node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args), "Text input dispatched") } ?: ActionResult(false, "Text target missing")
-            is AgentAction.Scroll -> find(action.nodeId ?: "0")?.let { node -> val id = when (action.direction) { Direction.UP -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD; Direction.DOWN -> AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD; else -> AccessibilityNodeInfo.ACTION_SCROLL_FORWARD }; ActionResult(node.performAction(id), "Scroll dispatched") } ?: ActionResult(false, "Scroll target missing")
-            AgentAction.PressBack -> ActionResult(performGlobalAction(GLOBAL_ACTION_BACK), "Back dispatched")
+            is AgentAction.Tap, is AgentAction.TypeText, is AgentAction.Scroll, AgentAction.PressBack ->
+                AccessibilityActionExecutor(::find, ::performGlobalAction).execute(action)
             is AgentAction.Wait -> {
                 kotlinx.coroutines.delay(action.milliseconds)
                 ActionResult(true, "Wait completed")

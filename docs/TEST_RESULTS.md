@@ -14,4 +14,4 @@ No Android device or emulator and no user Gemini API key were available in this 
 
 ## Automated coverage present
 
-`ActionProtocolTest` covers valid semantic targets, stale/unsafe targets, bounded waits, and consequential-action confirmation. `ActionPlanParserTest` covers typed JSON, malformed JSON, and unknown actions. These tests are intended to run through `./gradlew testDebugUnitTest` in GitHub Actions.
+`ActionProtocolTest` covers valid semantic targets, stale/unsafe targets, bounded waits, and consequential-action confirmation. `ActionPlanParserTest` covers typed JSON, malformed JSON, and unknown actions. `MainActivityUiTest` covers Compose validation, injected running/completed state, cancellation, and accessibility setup callback behavior. `AccessibilityActionExecutorEspressoTest` covers real Android node tap/text/scroll/back dispatch and honest failure for invalid/unsupported actions. JVM tests run through `./gradlew testDebugUnitTest`; instrumentation tests run through `./gradlew connectedDebugAndroidTest` on the CI API 35 emulator.
