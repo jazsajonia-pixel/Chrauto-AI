@@ -1,5 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
-        <activity android:name=".accessibility.AccessibilityInteractionTestActivity" android:exported="false" />
+        <activity android:name="com.chrauto.ai.accessibility.AccessibilityInteractionTestActivity" android:exported="true" />
     </application>
 </manifest>

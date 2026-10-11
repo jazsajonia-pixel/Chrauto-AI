@@ -3,6 +3,7 @@ package com.chrauto.ai
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -42,7 +43,8 @@ class MainActivityUiTest {
         }
         compose.onNodeWithTag("apiKeyInput").performTextInput("test-key")
         compose.onNodeWithTag("runButton").performClick()
-        compose.onNodeWithTag("status").assertTextContains("SUCCEEDED")
+        compose.waitUntil(2_000) { compose.onAllNodes(hasTestTag("status")).fetchSemanticsNodes().any { it.text.any { text -> text.text == "Status: SUCCEEDED" } } }
+        compose.onNodeWithTag("status").assertTextEquals("Status: SUCCEEDED")
         compose.onNode(hasTestTag("status")).assertExists()
     }
 
@@ -62,7 +64,8 @@ class MainActivityUiTest {
         compose.onNodeWithTag("runButton").performClick()
         compose.waitUntil(2_000) { started.get() }
         compose.onNodeWithTag("stopButton").assertIsEnabled().performClick()
-        compose.onNodeWithTag("status").assertTextContains("CANCELLED")
+        compose.waitUntil(2_000) { compose.onAllNodes(hasTestTag("status")).fetchSemanticsNodes().any { it.text.any { text -> text.text == "Status: CANCELLED" } } }
+        compose.onNodeWithTag("status").assertTextEquals("Status: CANCELLED")
     }
 
     @Test fun accessibilitySetupCallbackIsInvoked() {
