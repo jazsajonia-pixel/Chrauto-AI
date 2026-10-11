@@ -34,5 +34,14 @@ sleep 5
 adb exec-out screencap -p > "$OUT/06-done.png"
 adb shell am start -n $PKG/.MainActivity; sleep 3
 adb exec-out screencap -p > "$OUT/07-main-after-run.png"
+# Chron voice states (scripted, the emulator has no microphone input)
+adb shell input keyevent KEYCODE_HOME; sleep 1.5
+adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron listening; sleep 1.5
+adb exec-out screencap -p > "$OUT/08-chron-listening.png"
+adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron reply; sleep 1.2
+adb exec-out screencap -p > "$OUT/09-chron-reply.png"
+adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 2; adb shell input swipe 540 1500 540 600 300; sleep 1
+adb exec-out screencap -p > "$OUT/10-main-chron-card.png"
+adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron off
 ls -la "$OUT"
 [ -f "$OUT/SELFTEST_FAILED" ] && exit 1 || exit 0

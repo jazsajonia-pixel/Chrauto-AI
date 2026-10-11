@@ -103,8 +103,8 @@ object PromptBuilder {
         Actions and their fields:
         - open_app: package_name. (Chrome is com.android.chrome.) If the screen is the Chrauto AI app itself, open the target app first.
         - tap: node_id. Prefer nodes marked clickable=true; tapping a text label also works.
-        - type_text: node_id (an editable=true field), text. This replaces the field's text.
-        - press_enter: optional node_id of the field. Submits a search box / form (like the keyboard's Enter/Search key). Use right after type_text when searching.
+        - type_text: node_id (an editable=true field), text, optional submit. Replaces the field's text. Set submit=true to press Enter/Search right after typing (best for search boxes — saves a step).
+        - press_enter: optional node_id of the field. Submits a search box / form (like the keyboard's Enter/Search key).
         - scroll: direction (UP, DOWN, LEFT, RIGHT), optional node_id of a scrollable=true container. DOWN reveals content further down.
         - press_back
         - wait: milliseconds (300-5000) when the screen is still loading.
@@ -119,14 +119,18 @@ object PromptBuilder {
         - Keep "thought" to one short sentence the user will see.
 
         Reply with ONLY a JSON object, no markdown, using these keys (omit or null the ones you don't need):
-        {"thought": string, "action": string, "node_id": string, "package_name": string, "text": string,
+        {"thought": string, "action": string, "node_id": string, "package_name": string, "text": string, "submit": boolean,
          "direction": string, "milliseconds": integer, "summary": string, "evidence": string, "reason": string, "message": string}
     """.trimIndent()
 
     fun user(task: String, observation: UiObservation, history: List<String>, installedApps: String) = buildString {
         appendLine("User task: $task")
         appendLine()
-        if (installedApps.isNotBlank()) {
+        // The app list is long; only send it when the agent is likely to need to launch something.
+        val pkg = observation.packageName.orEmpty()
+        val needApps = history.isEmpty() || pkg == "com.chrauto.ai" || pkg.contains("launcher") || pkg.contains("home") ||
+            history.takeLast(3).any { it.contains("not installed", true) || it.contains("Open ", false) && it.contains("failed") }
+        if (installedApps.isNotBlank() && needApps) {
             appendLine("Launchable apps (label => package):")
             appendLine(installedApps)
             appendLine()
@@ -189,9 +193,21 @@ internal object Http {
             val text = (if (code in 200..299) c.inputStream else c.errorStream)?.bufferedReader()?.use { it.readText() }.orEmpty()
             if (code !in 200..299) throw ProviderHttpException(code, friendly(label, code, errorMessage(text)))
             return text
-        } finally {
-            c.disconnect()
+        } catch (e: IOException) {
+            c.disconnect() // drop broken sockets; healthy ones stay pooled for keep-alive
+            throw e
         }
+    }
+
+    /** Fire-and-forget connection warm-up (DNS + TLS) so the first AI call is faster. */
+    suspend fun warm(url: String) = withContext(Dispatchers.IO) {
+        runCatching {
+            val c = URL(url).openConnection() as HttpURLConnection
+            c.requestMethod = "HEAD"; c.connectTimeout = 5_000; c.readTimeout = 5_000
+            c.responseCode
+            (if (c.responseCode in 200..399) c.inputStream else c.errorStream)?.use { it.readBytes() }
+        }
+        Unit
     }
 
     fun errorMessage(body: String): String = runCatching {
@@ -270,12 +286,23 @@ class OpenAiChatProvider(
         ActionPlanParser.parse(text)
     }
 
-    private suspend fun call(task: String, observation: UiObservation, history: List<String>): String {
+    override suspend fun chat(system: String, user: String) = runCatching {
+        try { complete(system, user) } catch (e: ProviderHttpException) {
+            if (jsonMode && e.code == 400) { jsonMode = false; complete(system, user) } else throw e
+        }
+    }
+
+    override suspend fun warmUp() = Http.warm("$baseUrl/models")
+
+    private suspend fun call(task: String, observation: UiObservation, history: List<String>) =
+        complete(PromptBuilder.system, PromptBuilder.user(task, observation, history, installedApps))
+
+    private suspend fun complete(system: String, user: String): String {
         val body = JSONObject().apply {
             put("model", model)
             put("messages", JSONArray()
-                .put(JSONObject().put("role", "system").put("content", PromptBuilder.system))
-                .put(JSONObject().put("role", "user").put("content", PromptBuilder.user(task, observation, history, installedApps))))
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", user)))
             if (jsonMode) put("response_format", JSONObject().put("type", "json_object"))
             put("stream", false)
         }
@@ -309,11 +336,22 @@ class OpenAiResponsesProvider(
         ActionPlanParser.parse(text)
     }
 
-    private suspend fun call(task: String, observation: UiObservation, history: List<String>): String {
+    override suspend fun chat(system: String, user: String) = runCatching {
+        try { complete(system, user) } catch (e: ProviderHttpException) {
+            if (jsonMode && e.code == 400) { jsonMode = false; complete(system, user) } else throw e
+        }
+    }
+
+    override suspend fun warmUp() = Http.warm("$baseUrl/models")
+
+    private suspend fun call(task: String, observation: UiObservation, history: List<String>) =
+        complete(PromptBuilder.system, PromptBuilder.user(task, observation, history, installedApps))
+
+    private suspend fun complete(system: String, user: String): String {
         val body = JSONObject().apply {
             put("model", model)
-            put("instructions", PromptBuilder.system)
-            put("input", PromptBuilder.user(task, observation, history, installedApps))
+            put("instructions", system)
+            put("input", user)
             put("store", false)
             if (jsonMode) put("text", JSONObject().put("format", JSONObject().put("type", "json_object")))
         }
@@ -341,17 +379,25 @@ class AnthropicProvider(
     private val installedApps: String
 ) : AiProvider {
     override suspend fun plan(task: String, observation: UiObservation, history: List<String>) = runCatching {
+        ActionPlanParser.parse(complete(PromptBuilder.system, PromptBuilder.user(task, observation, history, installedApps)))
+    }
+
+    override suspend fun chat(system: String, user: String) = runCatching { complete(system, user) }
+
+    override suspend fun warmUp() = Http.warm("$baseUrl/models")
+
+    private suspend fun complete(system: String, user: String): String {
         require(apiKey.isNotBlank()) { "Anthropic API key is missing" }
         val body = JSONObject().apply {
             put("model", model)
             put("max_tokens", 4096)
-            put("system", PromptBuilder.system)
-            put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", PromptBuilder.user(task, observation, history, installedApps))))
+            put("system", system)
+            put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", user)))
         }
         val root = JSONObject(Http.request("Anthropic", "$baseUrl/messages", mapOf("x-api-key" to apiKey, "anthropic-version" to "2023-06-01"), body))
         val content = root.optJSONArray("content") ?: error("Anthropic returned no content")
         val text = (0 until content.length()).map { content.getJSONObject(it) }
             .filter { it.optString("type") == "text" }.joinToString("") { it.optString("text") }
-        ActionPlanParser.parse(text.ifBlank { error("Anthropic reply did not contain text (stop_reason=${root.optString("stop_reason")})") })
+        return text.ifBlank { error("Anthropic reply did not contain text (stop_reason=${root.optString("stop_reason")})") }
     }
 }

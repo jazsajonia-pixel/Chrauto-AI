@@ -46,6 +46,9 @@ import com.chrauto.ai.accessibility.AccessibilityBridge
 import com.chrauto.ai.agent.*
 import com.chrauto.ai.data.SettingsStore
 import com.chrauto.ai.overlay.Mood
+import com.chrauto.ai.voice.ChronEngine
+import com.chrauto.ai.voice.ChronService
+import android.os.Build
 import com.chrauto.ai.provider.AiConfig
 import com.chrauto.ai.provider.ModelLister
 import com.chrauto.ai.provider.ProviderKind
@@ -62,13 +65,32 @@ class MainActivity : ComponentActivity() {
     private lateinit var settings: SettingsStore
     private var accessibilityOn by mutableStateOf(false)
     private var micOn by mutableStateOf(false)
-    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { micOn = it }
+    private var chronOn by mutableStateOf(false)
+    private var startChronAfterMic = false
+    private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        micOn = granted
+        if (granted && (startChronAfterMic || settings.chronEnabled)) { startChronAfterMic = false; startChron() }
+    }
+    private val notifPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun setChron(on: Boolean) {
+        settings.chronEnabled = on
+        chronOn = on
+        if (!on) { ChronService.stop(this); return }
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        if (!micOn) { startChronAfterMic = true; micPermission.launch(Manifest.permission.RECORD_AUDIO) } else startChron()
+    }
+
+    private fun startChron() { if (!ChronService.running) ChronService.start(this) }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         settings = SettingsStore(this)
         AgentController.init(this)
+        ChronEngine.attach(this)
+        chronOn = settings.chronEnabled
         refreshPermissions()
         setContent {
             ChrautoTheme {
@@ -87,7 +109,15 @@ class MainActivity : ComponentActivity() {
                     onFloatingAssistantChanged = { floating = it; settings.floatingAssistant = it; AccessibilityBridge.setAssistantVisible(it) },
                     voiceReplies = voiceReplies,
                     onVoiceRepliesChanged = { voiceReplies = it; settings.voiceReplies = it },
-                    canStoreKey = settings.canStoreKey
+                    canStoreKey = settings.canStoreKey,
+                    chronEnabled = chronOn,
+                    onChronChanged = ::setChron,
+                    initialWakeName = settings.wakeName,
+                    onWakeNameChanged = { settings.wakeName = it.ifBlank { "Chron" } },
+                    onTalkNow = { if (!micOn) micPermission.launch(Manifest.permission.RECORD_AUDIO) else ChronEngine.listenNow(this) },
+                    loadRecents = { settings.recents },
+                    loadFavorites = { settings.favorites },
+                    onToggleFavorite = { settings.toggleFavorite(it) }
                 )
             }
         }
@@ -100,6 +130,7 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         refreshPermissions()
         if (settings.floatingAssistant) AccessibilityBridge.setAssistantVisible(true)
+        if (settings.chronEnabled && micOn) startChron()
     }
 
     private fun handleIntent(intent: Intent?) {
@@ -141,7 +172,15 @@ fun ChrautoScreen(
     voiceReplies: Boolean = true,
     onVoiceRepliesChanged: (Boolean) -> Unit = {},
     canStoreKey: Boolean = true,
-    observeController: Boolean = true
+    observeController: Boolean = true,
+    chronEnabled: Boolean = false,
+    onChronChanged: (Boolean) -> Unit = {},
+    initialWakeName: String = "Chron",
+    onWakeNameChanged: (String) -> Unit = {},
+    onTalkNow: () -> Unit = {},
+    loadRecents: () -> List<String> = { emptyList() },
+    loadFavorites: () -> List<String> = { emptyList() },
+    onToggleFavorite: (String) -> Boolean = { false }
 ) {
     val scope = rememberCoroutineScope()
     var task by remember { mutableStateOf(initialTask) }
@@ -150,6 +189,10 @@ fun ChrautoScreen(
     var state by remember { mutableStateOf(AgentState()) }
     var runJob by remember { mutableStateOf<Job?>(null) }
     val running = state.status == RunStatus.RUNNING
+    var favTick by remember { mutableIntStateOf(0) }
+    val recents = remember(state.status, favTick) { loadRecents() }
+    val favorites = remember(state.status, favTick) { loadFavorites() }
+    val chron by (if (observeController) ChronEngine.state else remember { kotlinx.coroutines.flow.MutableStateFlow(ChronEngine.State()) }).collectAsState()
 
     // Mirror runs started from the floating assistant (voice / retry).
     if (observeController) {
@@ -185,9 +228,11 @@ fun ChrautoScreen(
                     placeholder = { Text("e.g. Open Chrome and search for cute cat videos") },
                     minLines = 2, maxLines = 5, shape = RoundedCornerShape(16.dp)
                 )
+                val chips = (favorites.map { "★ $it" } + recents.filterNot { r -> favorites.any { it.equals(r, true) } } + QUICK_TASKS)
+                    .distinctBy { it.removePrefix("★ ").lowercase() }.take(14)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    QUICK_TASKS.forEach { q ->
-                        SuggestionChip(onClick = { task = q }, label = { Text(q.removeSuffix("."), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 220.dp)) },
+                    chips.forEach { q ->
+                        SuggestionChip(onClick = { task = q.removePrefix("★ ") }, label = { Text(q.removeSuffix("."), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 220.dp)) },
                             shape = RoundedCornerShape(50))
                     }
                 }
@@ -216,9 +261,15 @@ fun ChrautoScreen(
                         }
                     ) { Icon(painterResource(R.drawable.ic_stop), null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Stop") }
                 }
+                val isFav = favorites.any { it.equals(task.trim(), true) }
+                if (task.isNotBlank()) TextButton(onClick = { onToggleFavorite(task); favTick++ }, contentPadding = PaddingValues(horizontal = 4.dp), modifier = Modifier.testTag("favoriteButton")) {
+                    Text(if (isFav) "★ Saved to favorites" else "☆ Save to favorites", fontSize = 13.sp)
+                }
                 if (!config.isUsable) Text("Add your ${config.provider.label} API key above to start.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else if (!accessibilityEnabled) Text("Tip: turn on the Accessibility service so I can see and tap the screen.", style = MaterialTheme.typography.bodySmall, color = Brand.Amber)
             }
+
+            ChronCard(chron, chronEnabled, onChronChanged, initialWakeName, onWakeNameChanged, onTalkNow)
 
             StatusCard(state, onApprove = {
                 val c = config
@@ -302,6 +353,68 @@ private fun SetupCard(
                 ToggleRow("Voice replies", "The assistant talks back when it starts or finishes", voiceReplies, onVoiceRepliesChanged)
             }
         }
+    }
+}
+
+@Composable
+private fun ChronCard(
+    chron: ChronEngine.State, enabled: Boolean, onEnabled: (Boolean) -> Unit,
+    initialWakeName: String, onWakeName: (String) -> Unit, onTalkNow: () -> Unit
+) {
+    var wake by remember { mutableStateOf(initialWakeName) }
+    val name = wake.ifBlank { "Chron" }
+    val mood = when (chron.mode) {
+        ChronEngine.Mode.ACTIVE -> Mood.LISTENING
+        ChronEngine.Mode.THINKING -> Mood.THINKING
+        ChronEngine.Mode.SPEAKING -> Mood.HAPPY
+        else -> Mood.IDLE
+    }
+    SectionCard {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Mascot(mood, 46.dp)
+            Spacer(Modifier.width(10.dp))
+            Column(Modifier.weight(1f)) {
+                Text("Talk to $name", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    when (chron.mode) {
+                        ChronEngine.Mode.PASSIVE -> "Listening for “$name”…"
+                        ChronEngine.Mode.ACTIVE -> chron.partial.ifBlank { "I'm listening…" }
+                        ChronEngine.Mode.THINKING -> "Thinking about “${chron.heard}”"
+                        ChronEngine.Mode.SPEAKING -> "Talking…"
+                        ChronEngine.Mode.OFF -> chron.error ?: if (enabled) "Starting…" else "Say “$name, open YouTube” or ask a question"
+                    },
+                    style = MaterialTheme.typography.bodySmall, color = if (chron.mode == ChronEngine.Mode.ACTIVE) Brand.Violet else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis
+                )
+            }
+            FilledTonalButton(onClick = onTalkNow, shape = RoundedCornerShape(14.dp), modifier = Modifier.testTag("talkButton")) {
+                Icon(painterResource(R.drawable.ic_mic), null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp))
+                Text(if (chron.mode == ChronEngine.Mode.ACTIVE) "Stop" else "Talk")
+            }
+        }
+        ToggleRow("Hands-free “$name”", "Listens for its name, even in other apps. Shows a notification while on.", enabled, onEnabled, Modifier.testTag("chronSwitch"))
+        AnimatedVisibility(enabled) {
+            OutlinedTextField(wake, { wake = it.take(16); onWakeName(wake) }, Modifier.fillMaxWidth(), label = { Text("Wake name") }, singleLine = true,
+                shape = RoundedCornerShape(14.dp), supportingText = { Text("Tip: add the “$name” tile in Quick Settings to switch it on and off fast.") })
+        }
+        if (chron.conversation.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                chron.conversation.takeLast(4).forEach { (you, bot) ->
+                    ChatBubble(you, mine = true)
+                    ChatBubble(bot, mine = false)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChatBubble(text: String, mine: Boolean) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+        Box(
+            Modifier.widthIn(max = 280.dp).clip(RoundedCornerShape(18.dp, 18.dp, if (mine) 4.dp else 18.dp, if (mine) 18.dp else 4.dp))
+                .background(if (mine) Brand.Violet else Brand.VioletSoft).padding(horizontal = 12.dp, vertical = 8.dp)
+        ) { Text(text, color = if (mine) Color.White else Brand.Ink, style = MaterialTheme.typography.bodyMedium) }
     }
 }
 
@@ -435,8 +548,8 @@ private fun StepRow(n: Int, title: String, subtitle: String, done: Boolean, acti
 }
 
 @Composable
-private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = modifier.fillMaxWidth()) {
         Column(Modifier.weight(1f)) {
             Text(title, style = MaterialTheme.typography.titleSmall)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

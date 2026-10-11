@@ -62,6 +62,9 @@ class AccessibilityAgentService : AccessibilityService() {
             if (state.status == RunStatus.RUNNING && overlay == null) setAssistantVisible(true)
             overlay?.render(state)
         } }
+        com.chrauto.ai.voice.ChronEngine.attach(this)
+        s.launch { com.chrauto.ai.voice.ChronEngine.state.collect { overlay?.renderChron(it) } }
+        if (SettingsStore(this).chronEnabled && !com.chrauto.ai.voice.ChronService.running) com.chrauto.ai.voice.ChronService.start(this)
     }
 
     fun setAssistantVisible(visible: Boolean) {
@@ -69,6 +72,7 @@ class AccessibilityAgentService : AccessibilityService() {
             val o = overlay ?: runCatching { AssistantOverlay(this) }.getOrNull()?.also { overlay = it }
             o?.show()
             o?.render(AgentController.state.value)
+            o?.renderChron(com.chrauto.ai.voice.ChronEngine.state.value)
         } else {
             overlay?.detach(); overlay = null
         }
@@ -152,7 +156,15 @@ class AccessibilityAgentService : AccessibilityService() {
                 ActionResult(true, "Opened ${action.packageName}")
             }.getOrElse { ActionResult(false, it.message ?: "Could not open app") }
             is AgentAction.Tap -> tap(action, executor)
-            is AgentAction.TypeText, is AgentAction.Scroll, AgentAction.PressBack, is AgentAction.PressEnter -> executor.execute(action)
+            is AgentAction.TypeText -> {
+                val typed = executor.execute(action)
+                if (!typed.ok || !action.submit) typed else {
+                    delay(120)
+                    val enter = executor.execute(AgentAction.PressEnter(action.nodeId))
+                    if (enter.ok) ActionResult(true, "Typed and submitted") else ActionResult(true, "Typed (Enter not available: ${enter.message})")
+                }
+            }
+            is AgentAction.Scroll, AgentAction.PressBack, is AgentAction.PressEnter -> executor.execute(action)
             is AgentAction.Wait -> { delay(action.milliseconds); ActionResult(true, "Wait completed") }
             is AgentAction.AskUser -> ActionResult(false, "User confirmation required")
             is AgentAction.Finish -> ActionResult(true, "Finish is verified by orchestrator")

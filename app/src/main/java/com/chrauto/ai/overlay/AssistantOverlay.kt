@@ -31,6 +31,8 @@ import com.chrauto.ai.agent.AgentPhase
 import com.chrauto.ai.agent.AgentState
 import com.chrauto.ai.agent.RunStatus
 import com.chrauto.ai.data.SettingsStore
+import com.chrauto.ai.voice.ChronEngine
+import com.chrauto.ai.voice.Speaker
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -53,19 +55,10 @@ class AssistantOverlay(private val context: Context) {
     private val density = context.resources.displayMetrics.density
     private fun dp(v: Number) = (v.toFloat() * density).toInt()
 
-    private val speaker = Speaker(context)
-    private val voice = VoiceCommander(
-        context,
-        onListening = { listening -> this.listening = listening; refresh() },
-        onPartial = { partial -> setStatus("“$partial”") },
-        onResult = ::handleVoiceCommand,
-        onError = { message ->
-            setStatus(message); flashMood(Mood.SAD)
-            if (message.startsWith("Microphone")) openApp(requestMic = true)
-        }
-    )
-
-    private var listening = false
+    private var chron = ChronEngine.State()
+    private val listening get() = chron.mode == ChronEngine.Mode.ACTIVE
+    private var expandedByVoice = false
+    private var micPromptShown = false
     private var expanded = false
     private var hidden = false
     private var attached = false
@@ -76,11 +69,11 @@ class AssistantOverlay(private val context: Context) {
     // ---------- Dock ----------
     private val bubble = MascotView(context).apply { contentDescription = "Chrauto assistant" }
     private val statusText = TextView(context).apply {
-        textSize = 12.5f; setTextColor(MascotColors.INK); maxLines = 1; ellipsize = TextUtils.TruncateAt.END
+        textSize = 12.5f; setTextColor(MascotColors.INK); maxLines = 2; ellipsize = TextUtils.TruncateAt.END
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         setPadding(dp(4), 0, dp(4), dp(6))
     }
-    private val micBtn = roundButton(R.drawable.ic_mic, "Voice command", MascotColors.VIOLET) { voice.toggle() }
+    private val micBtn = roundButton(R.drawable.ic_mic, "Talk to Chron", MascotColors.VIOLET) { ChronEngine.listenNow(context) }
     private val stopBtn = roundButton(R.drawable.ic_stop, "Stop task", MascotColors.CORAL) { AgentController.stop(); speakIfEnabled("Okay, stopped.") }
     private val retryBtn = roundButton(R.drawable.ic_replay, "Repeat last task", 0xFF4C9AFF.toInt()) { retryLast() }
     private val appBtn = roundButton(R.drawable.ic_home, "Open Chrauto", 0xFF8E7CC3.toInt()) { openApp() }
@@ -127,8 +120,13 @@ class AssistantOverlay(private val context: Context) {
     /** Difference between requested window position and where the system actually placed it (cutouts, bars). */
     private var calibX = 0
     private var calibY = 0
+    /** Full-screen, untouchable layer; the buddy moves inside it with cheap GPU translations. */
+    private val cursorLayer = FrameLayout(context).apply {
+        clipChildren = false
+        addView(cursor, FrameLayout.LayoutParams(cursorSize, cursorSize))
+    }
     private val cursorParams = WindowManager.LayoutParams(
-        cursorSize, cursorSize,
+        WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
         WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
         WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
@@ -148,7 +146,6 @@ class AssistantOverlay(private val context: Context) {
     }
 
     fun detach() {
-        voice.cancel(); speaker.shutdown()
         hideCursor(immediate = true)
         if (attached) runCatching { wm.removeView(dock) }
         attached = false
@@ -187,7 +184,6 @@ class AssistantOverlay(private val context: Context) {
     fun show() { hidden = false; if (!attached) attach() else dock.visibility = View.VISIBLE; refresh() }
 
     fun hide() {
-        voice.cancel()
         collapse()
         hidden = true
         dock.animate().alpha(0f).scaleX(0.6f).scaleY(0.6f).setDuration(180).withEndAction {
@@ -203,7 +199,7 @@ class AssistantOverlay(private val context: Context) {
         if (state.status == RunStatus.RUNNING && previous.status != RunStatus.RUNNING) {
             statusOverride = null
             if (hidden) show()
-            speakIfEnabled("On it!")
+            if (!ChronEngine.recentlySpoke()) speakIfEnabled("On it!")
         }
         if (previous.status == RunStatus.RUNNING && state.status != RunStatus.RUNNING) {
             // Keep the footprint small: tuck the panel away a few seconds after a run ends.
@@ -230,6 +226,8 @@ class AssistantOverlay(private val context: Context) {
         val running = s.status == RunStatus.RUNNING
         bubble.mood = moodOverride ?: when {
             listening -> Mood.LISTENING
+            chron.mode == ChronEngine.Mode.THINKING -> Mood.THINKING
+            chron.mode == ChronEngine.Mode.SPEAKING -> Mood.HAPPY
             running && (s.phase == AgentPhase.MOVING || s.phase == AgentPhase.ACTING) -> Mood.WORKING
             running -> Mood.THINKING
             else -> Mood.IDLE
@@ -240,7 +238,9 @@ class AssistantOverlay(private val context: Context) {
             else -> Mood.WORKING
         }
         setStatus(statusOverride ?: when {
-            listening -> "Listening… tell me what to do"
+            listening -> chron.partial.takeIf { it.isNotBlank() }?.let { "“$it”" } ?: "Listening… tell me what to do"
+            chron.mode == ChronEngine.Mode.THINKING -> "“${chron.heard}” · thinking…"
+            chron.mode == ChronEngine.Mode.SPEAKING -> chron.reply
             running && s.phase == AgentPhase.THINKING -> {
                 val secs = (System.currentTimeMillis() - s.phaseSince) / 1000
                 if (secs >= 3) "Thinking… ${secs}s" else "Thinking…"
@@ -250,6 +250,7 @@ class AssistantOverlay(private val context: Context) {
             s.status == RunStatus.FAILED -> "Stuck: ${s.detail}"
             s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs you: ${s.detail} · tap ↻ to approve"
             s.status == RunStatus.CANCELLED -> "Stopped. Tap the mic for a new task."
+            chron.mode == ChronEngine.Mode.PASSIVE -> "Say “${settings.wakeName}, …” or tap the mic"
             else -> "Hi! Tap the mic and tell me what to do."
         }, override = false)
         micBtn.tint(if (listening) MascotColors.PINK else MascotColors.VIOLET)
@@ -262,9 +263,9 @@ class AssistantOverlay(private val context: Context) {
             statusOverride = text
             handler.removeCallbacks(clearOverride); handler.postDelayed(clearOverride, 4_000)
         }
-        statusText.text = text
+        if (statusText.text != text) statusText.text = text
     }
-    private val autoCollapse = Runnable { if (lastState.status != RunStatus.RUNNING && !listening) collapse() }
+    private val autoCollapse = Runnable { if (lastState.status != RunStatus.RUNNING && chron.mode != ChronEngine.Mode.ACTIVE && chron.mode != ChronEngine.Mode.SPEAKING) collapse() }
     private val clearOverride = Runnable { statusOverride = null; refresh() }
 
     private fun flashMood(mood: Mood) {
@@ -359,62 +360,52 @@ class AssistantOverlay(private val context: Context) {
 
     private fun showCursor() {
         val m = context.resources.displayMetrics
-        cursorParams.x = m.widthPixels / 2 - cursorSize / 2
-        cursorParams.y = (m.heightPixels * 0.45f).toInt() - cursorSize / 2
+        cursorParams.x = 0; cursorParams.y = 0
+        cursor.translationX = m.widthPixels / 2f - cursorSize / 2f
+        cursor.translationY = m.heightPixels * 0.45f - cursorSize / 2f
         cursor.alpha = 0f; cursor.scaleX = 0.3f; cursor.scaleY = 0.3f
-        runCatching { wm.addView(cursor, cursorParams) }.onSuccess {
+        runCatching { wm.addView(cursorLayer, cursorParams) }.onSuccess {
             cursorShown = true
-            cursor.post {
-                val loc = IntArray(2); cursor.getLocationOnScreen(loc)
-                calibX = loc[0] - cursorParams.x; calibY = loc[1] - cursorParams.y
+            cursorLayer.post {
+                val loc = IntArray(2); cursorLayer.getLocationOnScreen(loc)
+                calibX = loc[0]; calibY = loc[1]
             }
-            cursor.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).setInterpolator(OvershootInterpolator(1.8f)).start()
+            cursor.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(OvershootInterpolator(1.8f)).start()
         }
     }
 
     private fun hideCursor(immediate: Boolean = false) {
         cursorAnim?.cancel()
         if (!cursorShown) return
-        val remove = { if (cursorShown) { runCatching { wm.removeView(cursor) }; cursorShown = false } }
-        if (immediate) remove() else cursor.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setDuration(220).withEndAction(remove).start()
+        val remove = { if (cursorShown) { runCatching { wm.removeView(cursorLayer) }; cursorShown = false } }
+        if (immediate) remove() else cursor.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setDuration(200).withEndAction(remove).start()
     }
 
     private fun moveCursorTo(cx: Int, cy: Int) {
         if (!cursorShown) return
         cursorAnim?.cancel()
-        val fromX = cursorParams.x; val fromY = cursorParams.y
-        val toX = cx - cursorSize / 2 - calibX; val toY = cy - cursorSize / 2 - calibY
-        val dx = (toX - fromX).toFloat(); val dy = (toY - fromY).toFloat()
+        val fromX = cursor.translationX; val fromY = cursor.translationY
+        val toX = cx - cursorSize / 2f - calibX; val toY = cy - cursorSize / 2f - calibY
+        val dx = toX - fromX; val dy = toY - fromY
         val dist = hypot(dx, dy)
-        cursor.lookX = if (dist > 0) dx / dist else 0f; cursor.lookY = if (dist > 0) dy / dist else 0f
+        if (dist < 2f) return
+        cursor.lookX = dx / dist; cursor.lookY = dy / dist
         cursor.rotation = (dx / (dist + 1f)) * 12f
         cursorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = (170 + dist / density * 0.5f).toLong().coerceIn(170, 300)
             interpolator = DecelerateInterpolator(1.6f)
             addUpdateListener {
                 val f = it.animatedValue as Float
-                // Slight arc so it "floats" rather than slides.
-                val lift = (dist * 0.12f * (4f * f * (1f - f))).toInt()
-                cursorParams.x = (fromX + dx * f).toInt(); cursorParams.y = (fromY + dy * f).toInt() - lift
-                if (cursorShown) runCatching { wm.updateViewLayout(cursor, cursorParams) }
+                // Slight arc so it floats rather than slides.
+                cursor.translationX = fromX + dx * f
+                cursor.translationY = fromY + dy * f - dist * 0.12f * (4f * f * (1f - f))
             }
-            doOnEndCompat { cursor.animate().rotation(0f).setDuration(200).start(); cursor.lookX = 0f; cursor.lookY = 0f }
+            doOnEndCompat { cursor.animate().rotation(0f).setDuration(180).start(); cursor.lookX = 0f; cursor.lookY = 0f }
             start()
         }
     }
 
     // ---------- Actions ----------
-    private fun handleVoiceCommand(text: String) {
-        val t = text.trim()
-        val lower = t.lowercase()
-        if (lower in setOf("stop", "cancel", "stop it", "stop task", "never mind", "nevermind")) {
-            AgentController.stop(); setStatus("Okay, stopped."); speakIfEnabled("Okay, stopped."); return
-        }
-        setStatus("“$t”")
-        val problem = AgentController.startWithSavedSettings(t)
-        if (problem != null) { setStatus(problem); flashMood(Mood.SAD); speakIfEnabled(problem) }
-    }
-
     private fun retryLast() {
         if (lastState.status == RunStatus.NEEDS_ASSISTANCE) {
             AgentController.approveAndContinue()?.let { setStatus(it); flashMood(Mood.SAD) } ?: speakIfEnabled("Okay, continuing.")
@@ -433,7 +424,24 @@ class AssistantOverlay(private val context: Context) {
         collapse()
     }
 
-    private fun speakIfEnabled(text: String) { if (settings.voiceReplies) speaker.say(text) }
+    private fun speakIfEnabled(text: String) { if (settings.voiceReplies) Speaker.say(text) }
+
+    /** Called for every Chron voice state change. */
+    fun renderChron(state: ChronEngine.State) {
+        val prev = chron
+        chron = state
+        bubble.earOn = state.mode == ChronEngine.Mode.PASSIVE
+        if (state.mode == ChronEngine.Mode.ACTIVE && prev.mode != ChronEngine.Mode.ACTIVE) {
+            if (hidden) show()
+            if (!expanded) { expand(); expandedByVoice = true }
+        }
+        if ((state.mode == ChronEngine.Mode.PASSIVE || state.mode == ChronEngine.Mode.OFF) &&
+            (prev.mode == ChronEngine.Mode.SPEAKING || prev.mode == ChronEngine.Mode.ACTIVE) && expandedByVoice) {
+            handler.removeCallbacks(autoCollapse); handler.postDelayed(autoCollapse, 3_500); expandedByVoice = false
+        }
+        if (state.error?.startsWith("Microphone") == true && !micPromptShown) { micPromptShown = true; openApp(requestMic = true) }
+        refresh()
+    }
 
     private fun roundButton(icon: Int, label: String, color: Int, onClick: () -> Unit): ImageView = ImageView(context).apply {
         setImageResource(icon)

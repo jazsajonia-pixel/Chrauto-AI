@@ -4,6 +4,7 @@ import com.chrauto.ai.provider.AiProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 
 interface DeviceBridge {
@@ -40,6 +41,8 @@ class AgentOrchestrator(
     private val maxConsecutiveFailures: Int = 3,
     private val previewMs: Long = 320,
     private val approved: Boolean = false,
+    /** Launchable apps (label → package) for the instant "open X" shortcut. */
+    private val apps: Map<String, String> = emptyMap(),
     private val onState: (AgentState) -> Unit
 ) {
     suspend fun run(task: String) {
@@ -55,11 +58,31 @@ class AgentOrchestrator(
 
         try {
             if (!device.isReady()) throw IllegalStateException("Accessibility Service is disabled. Enable Chrauto AI in Android Settings → Accessibility first.")
+            // Open the network connection while we read the screen.
+            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { provider.warmUp() } }
             var observation = device.observe() ?: throw IllegalStateException("No accessible active window is available.")
             var actions = 0
             var requests = 0
             var consecutiveFailures = 0
             val history = mutableListOf<String>()
+            // Instant path: "open X (and …)" launches the app locally without waiting for the AI.
+            Shortcuts.openApp(task, apps)?.let { shortcut ->
+                val label = "Open ${shortcut.label}"
+                update { it.copy(phase = AgentPhase.ACTING, detail = label, step = 1) }
+                log("Step 1: $label (instant)")
+                val result = device.execute(AgentAction.OpenApp(shortcut.packageName))
+                if (result.ok) {
+                    actions++
+                    history += "$label → ok (already done for you; continue with the rest of the task)"
+                    device.settle(2_500)
+                    observation = device.observe() ?: observation
+                    if (shortcut.rest.isBlank() && observation.packageName == shortcut.packageName) {
+                        log("Done: Opened ${shortcut.label}")
+                        update { it.copy(status = RunStatus.SUCCEEDED, phase = AgentPhase.DONE, detail = "Opened ${shortcut.label}", target = null) }
+                        return
+                    }
+                }
+            }
             if (approved) history += "NOTE: the user explicitly approved this task (including any send/submit step). Proceed without asking again."
             val fingerprints = mutableMapOf<String, Int>()
 

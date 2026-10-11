@@ -35,14 +35,32 @@ object MascotPainter {
     private val spark = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = MascotColors.GOLD }
     private val oval = RectF()
     private val path = Path()
+    // Shaders are cached per radius and drawn around (0,0) via canvas.translate, so no per-frame allocations.
+    private class Shaders(r: Float) {
+        val body: Shader = LinearGradient(-r, -r, r, r, MascotColors.VIOLET, MascotColors.PINK, Shader.TileMode.CLAMP)
+        val ring: Shader = SweepGradient(0f, 0f, intArrayOf(0x00FFFFFF, MascotColors.GOLD, MascotColors.PINK, 0x00FFFFFF), null)
+        val shadow: Shader = RadialGradient(0f, r * 0.95f, r * 0.9f, 0x33000000, 0x00000000, Shader.TileMode.CLAMP)
+    }
+    private val cache = HashMap<Int, Shaders>()
+    private var bodyShader: Shader? = null
+    private var ringShader: Shader? = null
+    private var shadowShader: Shader? = null
+    private fun shaders(r: Float) {
+        val s = cache.getOrPut((r * 4).toInt()) { if (cache.size > 12) cache.clear(); Shaders(r) }
+        bodyShader = s.body; ringShader = s.ring; shadowShader = s.shadow
+    }
 
     /** [t] is a free-running animation clock in seconds. [blink] 0 = open, 1 = closed. */
-    fun draw(canvas: Canvas, cx: Float, cy: Float, r: Float, mood: Mood, t: Float, blink: Float, lookX: Float = 0f, lookY: Float = 0f) {
+    fun draw(canvas: Canvas, ox: Float, oy: Float, r: Float, mood: Mood, t: Float, blink: Float, lookX: Float = 0f, lookY: Float = 0f) {
+        shaders(r)
+        canvas.save()
+        canvas.translate(ox, oy)
+        val cx = 0f; val cy = 0f
         // Glow / activity ring
         when (mood) {
             Mood.THINKING, Mood.WORKING -> {
                 ring.strokeWidth = r * 0.14f
-                ring.shader = SweepGradient(cx, cy, intArrayOf(0x00FFFFFF, MascotColors.GOLD, MascotColors.PINK, 0x00FFFFFF), null)
+                ring.shader = ringShader
                 canvas.save(); canvas.rotate((t * 360f * (if (mood == Mood.THINKING) 0.9f else 1.6f)) % 360f, cx, cy)
                 oval.set(cx - r * 1.22f, cy - r * 1.22f, cx + r * 1.22f, cy + r * 1.22f)
                 canvas.drawArc(oval, 0f, 280f, false, ring); canvas.restore()
@@ -60,13 +78,13 @@ object MascotPainter {
             else -> Unit
         }
         // Soft drop shadow
-        glow.shader = RadialGradient(cx, cy + r * 0.95f, r * 0.9f, 0x33000000, 0x00000000, Shader.TileMode.CLAMP)
+        glow.shader = shadowShader
         oval.set(cx - r * 0.85f, cy + r * 0.72f, cx + r * 0.85f, cy + r * 1.12f)
         canvas.drawOval(oval, glow)
 
         // Body (slightly squishy)
         val squish = 1f + 0.03f * sin(t * 2f * PI.toFloat())
-        body.shader = LinearGradient(cx - r, cy - r, cx + r, cy + r, MascotColors.VIOLET, MascotColors.PINK, Shader.TileMode.CLAMP)
+        body.shader = bodyShader
         oval.set(cx - r * squish, cy - r / squish, cx + r * squish, cy + r / squish)
         canvas.drawOval(oval, body)
         oval.set(cx - r * 0.62f, cy - r * 0.82f, cx - r * 0.05f, cy - r * 0.42f)
@@ -111,6 +129,7 @@ object MascotPainter {
             Mood.HAPPY -> { path.moveTo(cx - r * 0.2f, my - r * 0.02f); path.quadTo(cx, my + r * 0.24f, cx + r * 0.2f, my - r * 0.02f); canvas.drawPath(path, line) }
             else -> { path.moveTo(cx - r * 0.15f, my); path.quadTo(cx, my + r * 0.15f, cx + r * 0.15f, my); canvas.drawPath(path, line) }
         }
+        canvas.restore()
     }
 
     private fun drawSparkle(canvas: Canvas, x: Float, y: Float, s: Float, t: Float) {
@@ -132,6 +151,12 @@ open class MascotView(context: Context) : View(context) {
         set(value) { field = value; invalidate() }
     var lookX = 0f
     var lookY = 0f
+    /** Small mint "ear" shown while Chron is listening for its name. */
+    var earOn = false
+        set(value) { if (field != value) { field = value; invalidate() } }
+    private val ear = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = MascotColors.MINT }
+    private val earRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
+    private var lastFrame = 0L
     protected var clock = 0f
     private var blink = 0f
     private var nextBlink = 2.5f
@@ -142,10 +167,12 @@ open class MascotView(context: Context) : View(context) {
             val now = System.nanoTime(); val dt = ((now - last) / 1e9f).coerceIn(0f, 0.1f); clock += dt; last = now
             nextBlink -= dt
             blink = if (nextBlink < 0f) { val b = (-nextBlink) / 0.16f; if (b >= 2f) { nextBlink = 2f + (Math.random() * 3).toFloat(); 0f } else if (b < 1f) b else 2f - b } else 0f
-            invalidate()
+            // ~40 fps is plenty for a floating buddy and saves battery; skip work when not visible.
+            if (isShown && now - lastFrame >= 24_000_000L) { lastFrame = now; invalidate() }
         }
     }
 
+    init { setLayerType(LAYER_TYPE_HARDWARE, null) }
     override fun onAttachedToWindow() { super.onAttachedToWindow(); ticker.start() }
     override fun onDetachedFromWindow() { ticker.cancel(); super.onDetachedFromWindow() }
 
@@ -153,6 +180,12 @@ open class MascotView(context: Context) : View(context) {
         val r = min(width, height) * 0.36f
         val bob = r * 0.06f * sin(clock * 2.4f)
         MascotPainter.draw(canvas, width / 2f, height / 2f + r * 0.08f + bob, r, mood, clock, blink, lookX, lookY)
+        if (earOn) {
+            val ex = width / 2f + r * 0.78f; val ey = height / 2f - r * 0.7f + bob
+            val pulse = 1f + 0.18f * sin(clock * 4f)
+            canvas.drawCircle(ex, ey, r * 0.2f * pulse, earRing)
+            canvas.drawCircle(ex, ey, r * 0.14f * pulse, ear)
+        }
     }
 }
 

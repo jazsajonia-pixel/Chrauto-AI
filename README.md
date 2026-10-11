@@ -12,6 +12,15 @@ The test suite includes JVM protocol/parser tests, Compose UI instrumentation te
 
 The provider default is `gemini-3.8-flash`, selected because the current official Gemini documentation lists it as a stable multimodal model with structured-output support. Gemini limits are project/model dependent and the free tier is not guaranteed; check AI Studio before testing. The API key is entered on the device and never committed or printed in logs.
 
+## What's new in 0.4.0 — Chron
+
+- Say **"Chron, …"** from any app (hands-free wake word, foreground service + Quick Settings tile), or tap the mic.
+- Live conversation: Chron answers questions out loud and keeps listening for follow-ups without the wake word.
+- "Stop" instantly cancels a running task; commands start tasks with your chosen AI provider.
+- Faster: instant local "open app" shortcut, type-and-submit in one step, keep-alive + pre-warmed connections, smaller prompts.
+- Smoother: GPU-translated cursor buddy, cached mascot shaders, frame-capped animation.
+- Favorites and recent tasks as one-tap chips.
+
 ## What's new in 0.3.0
 
 - **More accurate taps**: the agent now taps with a real touch gesture at the centre of the exact element the AI picked, instead of only an accessibility "click" (which some apps, WebViews, and Chrome pages ignore). If nothing changes on screen, it tries a direct accessibility click once.

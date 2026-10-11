@@ -11,6 +11,10 @@ import org.json.JSONObject
 
 interface AiProvider {
     suspend fun plan(task: String, observation: UiObservation, history: List<String> = emptyList()): Result<ActionPlan>
+    /** Free-form completion used by the Chron voice assistant (expects a JSON reply). */
+    suspend fun chat(system: String, user: String): Result<String> = Result.failure(UnsupportedOperationException("chat not supported"))
+    /** Opens the TLS connection early so the first real request is faster. */
+    suspend fun warmUp() {}
 }
 
 const val DEFAULT_MODEL = "gemini-3.8-flash"
@@ -32,6 +36,22 @@ class GeminiProvider(
         }
         ActionPlanParser.parse(text)
     }
+
+    override suspend fun chat(system: String, user: String): Result<String> = runCatching {
+        val modelId = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
+        val request = JSONObject().apply {
+            put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+            put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))))
+            put("generationConfig", JSONObject().apply {
+                put("responseMimeType", "application/json")
+                put("temperature", 0.6)
+                thinking?.let { put("thinkingConfig", it) }
+            })
+        }
+        extractText(Http.request("Gemini", "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent", mapOf("x-goog-api-key" to apiKey), request, timeoutMs))
+    }
+
+    override suspend fun warmUp() = Http.warm("https://generativelanguage.googleapis.com/")
 
     private suspend fun call(task: String, observation: UiObservation, history: List<String>): String {
         val modelId = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
@@ -91,6 +111,7 @@ class GeminiProvider(
                 put("package_name", str("Android package for open_app"))
                 put("text", str("Text for type_text"))
                 put("direction", str("Scroll direction", listOf("UP", "DOWN", "LEFT", "RIGHT")))
+                put("submit", JSONObject().put("type", "boolean").put("nullable", true).put("description", "For type_text: press Enter/Search right after typing"))
                 put("milliseconds", JSONObject().put("type", "integer").put("nullable", true).put("description", "Wait duration"))
                 put("summary", str("Summary for finish"))
                 put("evidence", str("Exact on-screen text proving completion"))
@@ -99,7 +120,7 @@ class GeminiProvider(
                 put("thought", str("One short sentence describing what you are doing, shown to the user"))
             })
             put("required", JSONArray(listOf("action")))
-            put("propertyOrdering", JSONArray(listOf("thought", "action", "node_id", "package_name", "text", "direction", "milliseconds", "summary", "evidence", "reason", "message")))
+            put("propertyOrdering", JSONArray(listOf("thought", "action", "node_id", "package_name", "text", "submit", "direction", "milliseconds", "summary", "evidence", "reason", "message")))
         }
     }
 }
@@ -127,7 +148,7 @@ object ActionPlanParser {
         val action = when (val type = value("action")) {
             "open_app" -> AgentAction.OpenApp(value("package_name"))
             "tap", "click" -> AgentAction.Tap(value("node_id"))
-            "type_text" -> AgentAction.TypeText(value("node_id"), opt("text") ?: "")
+            "type_text" -> AgentAction.TypeText(value("node_id"), opt("text") ?: "", submit = opt("submit")?.toBooleanStrictOrNull() == true)
             "scroll" -> AgentAction.Scroll(opt("node_id"), Direction.valueOf(value("direction").uppercase()))
             "press_enter", "submit", "enter" -> AgentAction.PressEnter(opt("node_id"))
             "press_back", "back" -> AgentAction.PressBack

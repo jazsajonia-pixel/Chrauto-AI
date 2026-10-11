@@ -67,5 +67,41 @@ class SettingsStore(context: Context) {
         get() = plain.getBoolean("voice_replies", true)
         set(value) = plain.edit().putBoolean("voice_replies", value).apply()
 
+    // ---- Chron voice assistant ----
+    var chronEnabled: Boolean
+        get() = plain.getBoolean("chron_enabled", false)
+        set(value) = plain.edit().putBoolean("chron_enabled", value).apply()
+
+    var wakeName: String
+        get() = plain.getString("wake_name", "Chron").orEmpty().ifBlank { "Chron" }
+        set(value) = plain.edit().putString("wake_name", value.trim()).apply()
+
+    var pauseWhenScreenOff: Boolean
+        get() = plain.getBoolean("chron_screen_off_pause", true)
+        set(value) = plain.edit().putBoolean("chron_screen_off_pause", value).apply()
+
+    // ---- Task history & favourites ----
+    val recents: List<String> get() = readList("recent_tasks")
+    val favorites: List<String> get() = readList("favorite_tasks")
+
+    fun addRecent(task: String) {
+        val t = task.trim(); if (t.isBlank()) return
+        writeList("recent_tasks", (listOf(t) + recents.filterNot { it.equals(t, true) }).take(12))
+    }
+    fun toggleFavorite(task: String): Boolean {
+        val t = task.trim(); if (t.isBlank()) return false
+        val fav = favorites
+        val now = fav.none { it.equals(t, true) }
+        writeList("favorite_tasks", if (now) (listOf(t) + fav).take(20) else fav.filterNot { it.equals(t, true) })
+        return now
+    }
+    fun removeRecent(task: String) = writeList("recent_tasks", recents.filterNot { it == task })
+
+    private fun readList(key: String): List<String> = runCatching {
+        val a = org.json.JSONArray(plain.getString(key, "[]"))
+        (0 until a.length()).map { a.getString(it) }
+    }.getOrDefault(emptyList())
+    private fun writeList(key: String, list: List<String>) = plain.edit().putString(key, org.json.JSONArray(list).toString()).apply()
+
     val canStoreKey get() = secure != null
 }

@@ -44,10 +44,12 @@ object AgentController {
 
     fun start(task: String, config: AiConfig, approved: Boolean = false): Job {
         job?.cancel()
-        appContext?.let { SettingsStore(it).lastTask = task }
+        appContext?.let { SettingsStore(it).apply { lastTask = task; addRecent(task) } }
         val apps = appContext?.let(::launchableApps).orEmpty()
+        val appText = apps.joinToString("\n") { "${it.first} => ${it.second}" }
+        val appMap = apps.toMap()
         val newJob = scope.launch {
-            AgentOrchestrator(ProviderFactory.create(config, apps), AccessibilityBridge, approved = approved) { _state.value = it }.run(task)
+            AgentOrchestrator(ProviderFactory.create(config, appText), AccessibilityBridge, approved = approved, apps = appMap) { _state.value = it }.run(task)
         }
         job = newJob
         return newJob
@@ -99,15 +101,22 @@ object AgentController {
 
     fun dismiss() { if (!isRunning) _state.value = _state.value.copy(phase = AgentPhase.IDLE, target = null) }
 
-    private fun launchableApps(context: Context): String = runCatching {
-        val pm = context.packageManager
-        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        pm.queryIntentActivities(intent, 0)
-            .map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
-            .filter { it.second != context.packageName }
-            .distinctBy { it.second }
-            .sortedBy { it.first.lowercase() }
-            .take(150)
-            .joinToString("\n") { "${it.first} => ${it.second}" }
-    }.getOrDefault("")
+    @Volatile private var appCache: Pair<Long, List<Pair<String, String>>>? = null
+
+    /** Launchable apps (label, package), cached for a minute so starting a run stays instant. */
+    private fun launchableApps(context: Context): List<Pair<String, String>> {
+        appCache?.let { (at, list) -> if (System.currentTimeMillis() - at < 60_000) return list }
+        val list = runCatching {
+            val pm = context.packageManager
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            pm.queryIntentActivities(intent, 0)
+                .map { it.loadLabel(pm).toString() to it.activityInfo.packageName }
+                .filter { it.second != context.packageName }
+                .distinctBy { it.second }
+                .sortedBy { it.first.lowercase() }
+                .take(150)
+        }.getOrDefault(emptyList())
+        appCache = System.currentTimeMillis() to list
+        return list
+    }
 }

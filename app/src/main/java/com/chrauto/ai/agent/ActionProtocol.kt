@@ -11,7 +11,7 @@ sealed interface AgentAction {
     data class Tap(val nodeId: String, val viaGesture: Boolean = true) : AgentAction
     /** Submits the focused/given text field (keyboard Enter / Search). */
     data class PressEnter(val nodeId: String? = null) : AgentAction
-    data class TypeText(val nodeId: String, val text: String, val replace: Boolean = true) : AgentAction
+    data class TypeText(val nodeId: String, val text: String, val replace: Boolean = true, val submit: Boolean = false) : AgentAction
     data class Scroll(val nodeId: String?, val direction: Direction) : AgentAction
     data object PressBack : AgentAction
     data class Wait(val milliseconds: Long) : AgentAction
