@@ -94,7 +94,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           [ -d screenshots ] || exit 0
-          zip -qj ui-screenshots.zip screenshots/*.png
+          zip -qj ui-screenshots.zip screenshots/*
           gh release delete ci-screenshots --yes --cleanup-tag || true
           gh release create ci-screenshots ui-screenshots.zip --prerelease --target "${GITHUB_SHA}" \
             --title "CI UI screenshots" --notes "Emulator screenshots from ${GITHUB_SHA} (for review only; not an app build)."

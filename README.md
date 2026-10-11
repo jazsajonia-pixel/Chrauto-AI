@@ -10,6 +10,15 @@ The test suite includes JVM protocol/parser tests, Compose UI instrumentation te
 
 The provider default is `gemini-3.8-flash`, selected because the current official Gemini documentation lists it as a stable multimodal model with structured-output support. Gemini limits are project/model dependent and the free tier is not guaranteed; check AI Studio before testing. The API key is entered on the device and never committed or printed in logs.
 
+## What's new in 0.3.0
+
+- **More accurate taps**: the agent now taps with a real touch gesture at the centre of the exact element the AI picked, instead of only an accessibility "click" (which some apps, WebViews, and Chrome pages ignore). If nothing changes on screen, it tries a direct accessibility click once.
+- **No more tapping the wrong thing after the screen shifts**: node ids are tree paths, which break when lists load or suggestions appear. Before acting, the app checks the element is still the same one and, if not, finds it again by its text, label, and position.
+- **Faster and less stuck**: instead of fixed sleeps, the app waits only until the screen stops changing. The preview pause before each tap is shorter, Gemini uses low thinking, temporary network/rate-limit errors are retried once, and screen reads retry during app switches. The bubble shows how long the AI has been thinking.
+- **New "press_enter" action** submits search boxes, a common place the agent used to get stuck. Toggle state (checked=true/false) and element positions are now sent to the AI.
+- **Approve & continue**: when a task pauses before a send/submit/buy step, you can approve it from the app or the bubble's ↻ button.
+- **Choose your AI**: Google Gemini, Groq, OpenRouter, Mistral, Cerebras, NVIDIA NIM, OpenAI, Anthropic Claude, xAI Grok, DeepSeek, or any OpenAI-compatible server (Ollama, LM Studio). Each provider keeps its own encrypted key and model. Providers with free tiers are marked, "Get a key" opens the right page, and "Load" fetches the provider's live model list (free OpenRouter models first).
+
 ## What's new in 0.2.0
 
 - **Fixed Gemini HTTP 400** (`Invalid value at generation_config.response_schema.properties[..].value.type`). The request schema was putting Kotlin arrays (`arrayOf("string","null")`) into `org.json`, which serialised them as `[Ljava.lang.String;@...`. Gemini's `responseSchema` uses the OpenAPI subset, so nullable fields now use `"nullable": true`. JSON `null` values in replies are treated as missing, and regression tests cover both.

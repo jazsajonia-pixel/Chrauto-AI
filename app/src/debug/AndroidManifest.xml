@@ -2,5 +2,7 @@
     <application>
         <activity android:name=".accessibility.AccessibilityInteractionTestActivity" android:exported="true" />
         <receiver android:name=".debug.DemoReceiver" android:exported="true" />
+        <receiver android:name=".debug.SelfTestReceiver" android:exported="true" />
+        <activity android:name=".debug.TouchLabActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
     </application>
 </manifest>

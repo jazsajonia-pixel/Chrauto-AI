@@ -20,7 +20,8 @@ class AccessibilityNodeInfoTarget(private val node: AccessibilityNodeInfo) : Acc
 /** Executes only the semantic actions authorized by the agent protocol. */
 class AccessibilityActionExecutor(
     private val findNode: (String) -> AccessibilityNodeTarget?,
-    private val performGlobalAction: (Int) -> Boolean
+    private val performGlobalAction: (Int) -> Boolean,
+    private val findFocusedInput: () -> AccessibilityNodeTarget? = { null }
 ) {
     fun execute(action: AgentAction): ActionResult = when (action) {
         is AgentAction.Tap -> findNode(action.nodeId)?.let {
@@ -31,7 +32,16 @@ class AccessibilityActionExecutor(
             val args = Bundle().apply {
                 putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, action.text)
             }
-            ActionResult(node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args), "Text input dispatched")
+            node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+            val ok = node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+            if (ok) {
+                // Put the cursor at the end so a following Enter submits the whole query.
+                node.performAction(AccessibilityNodeInfo.ACTION_SET_SELECTION, Bundle().apply {
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_START_INT, action.text.length)
+                    putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_SELECTION_END_INT, action.text.length)
+                })
+            }
+            ActionResult(ok, "Text input dispatched")
         } ?: ActionResult(false, "Text target missing")
         is AgentAction.Scroll -> findNode(action.nodeId ?: "0")?.let { node ->
             val scrollAction = when (action.direction) {
@@ -41,6 +51,14 @@ class AccessibilityActionExecutor(
             }
             ActionResult(node.performAction(scrollAction), "Scroll dispatched")
         } ?: ActionResult(false, "Scroll target missing")
+        is AgentAction.PressEnter -> {
+            val node = action.nodeId?.let(findNode) ?: findFocusedInput()
+            when {
+                node == null -> ActionResult(false, "No focused text field to submit")
+                android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R -> ActionResult(false, "Enter needs Android 11+; tap the search button instead")
+                else -> ActionResult(node.performAction(android.R.id.accessibilityActionImeEnter), "Enter dispatched")
+            }
+        }
         AgentAction.PressBack -> ActionResult(
             performGlobalAction(android.accessibilityservice.AccessibilityService.GLOBAL_ACTION_BACK),
             "Back dispatched"

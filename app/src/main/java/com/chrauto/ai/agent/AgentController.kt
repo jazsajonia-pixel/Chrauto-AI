@@ -4,7 +4,8 @@ import android.content.Context
 import android.content.Intent
 import com.chrauto.ai.accessibility.AccessibilityBridge
 import com.chrauto.ai.data.SettingsStore
-import com.chrauto.ai.provider.GeminiProvider
+import com.chrauto.ai.provider.AiConfig
+import com.chrauto.ai.provider.ProviderFactory
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -26,28 +27,35 @@ object AgentController {
     val isRunning get() = job?.isActive == true
 
     /** Starts a run with saved settings (used by voice and the floating panel). */
-    fun startWithSavedSettings(task: String): String? {
+    fun startWithSavedSettings(task: String, approved: Boolean = false): String? {
         val ctx = appContext ?: return "App not initialised"
-        val settings = SettingsStore(ctx)
-        if (settings.apiKey.isBlank()) return "Add your Gemini API key in the Chrauto app first."
-        start(task, settings.apiKey, settings.model)
+        val config = SettingsStore(ctx).config()
+        if (!config.isUsable) return "Add your ${config.provider.label} API key in the Chrauto app first."
+        start(task, config, approved)
         return null
     }
 
-    fun start(task: String, apiKey: String, model: String): Job {
+    /** Re-runs the paused task after the user approved it. */
+    fun approveAndContinue(): String? {
+        val task = _state.value.task.ifBlank { appContext?.let { SettingsStore(it).lastTask }.orEmpty() }
+        if (task.isBlank()) return "Nothing to continue"
+        return startWithSavedSettings(task, approved = true)
+    }
+
+    fun start(task: String, config: AiConfig, approved: Boolean = false): Job {
         job?.cancel()
         appContext?.let { SettingsStore(it).lastTask = task }
         val apps = appContext?.let(::launchableApps).orEmpty()
         val newJob = scope.launch {
-            AgentOrchestrator(GeminiProvider(apiKey.trim(), model.trim(), apps), AccessibilityBridge) { _state.value = it }.run(task)
+            AgentOrchestrator(ProviderFactory.create(config, apps), AccessibilityBridge, approved = approved) { _state.value = it }.run(task)
         }
         job = newJob
         return newJob
     }
 
     /** Suspends until the run ends, mirroring states to [onState]; cancelling the caller stops the run. */
-    suspend fun runAndAwait(task: String, apiKey: String, model: String, onState: (AgentState) -> Unit) {
-        val run = start(task, apiKey, model)
+    suspend fun runAndAwait(task: String, config: AiConfig, onState: (AgentState) -> Unit, approved: Boolean = false) {
+        val run = start(task, config, approved)
         try {
             coroutineScope {
                 val mirror = launch { state.collect { onState(it) } }
@@ -99,7 +107,7 @@ object AgentController {
             .filter { it.second != context.packageName }
             .distinctBy { it.second }
             .sortedBy { it.first.lowercase() }
-            .take(120)
+            .take(150)
             .joinToString("\n") { "${it.first} => ${it.second}" }
     }.getOrDefault("")
 }

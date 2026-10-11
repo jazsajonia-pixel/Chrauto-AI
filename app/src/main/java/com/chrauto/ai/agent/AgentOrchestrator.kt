@@ -10,6 +10,8 @@ interface DeviceBridge {
     fun isReady(): Boolean
     suspend fun observe(): UiObservation?
     suspend fun execute(action: AgentAction): ActionResult
+    /** Waits until the screen stops changing (up to [maxMs]). */
+    suspend fun settle(maxMs: Long) { delay(minOf(maxMs, 600)) }
 }
 
 enum class RunStatus { IDLE, RUNNING, SUCCEEDED, FAILED, CANCELLED, NEEDS_ASSISTANCE }
@@ -25,7 +27,8 @@ data class AgentState(
     val phase: AgentPhase = AgentPhase.IDLE,
     val detail: String = "",
     val target: TargetBox? = null,
-    val step: Int = 0
+    val step: Int = 0,
+    val phaseSince: Long = System.currentTimeMillis()
 )
 
 class AgentOrchestrator(
@@ -35,14 +38,19 @@ class AgentOrchestrator(
     private val maxRequests: Int = 30,
     private val maxDurationMs: Long = 240_000,
     private val maxConsecutiveFailures: Int = 3,
-    private val previewMs: Long = 700,
+    private val previewMs: Long = 320,
+    private val approved: Boolean = false,
     private val onState: (AgentState) -> Unit
 ) {
     suspend fun run(task: String) {
         val started = System.currentTimeMillis()
         var state = AgentState(RunStatus.RUNNING, listOf(AgentLog("Started: ${task.take(160)}")), task, AgentPhase.OBSERVING, "Looking at the screen")
         onState(state)
-        fun update(transform: (AgentState) -> AgentState) { state = transform(state); onState(state) }
+        fun update(transform: (AgentState) -> AgentState) {
+            val next = transform(state)
+            state = if (next.phase != state.phase) next.copy(phaseSince = System.currentTimeMillis()) else next
+            onState(state)
+        }
         fun log(message: String, error: Boolean = false) = update { it.copy(logs = (it.logs + AgentLog(message, error)).takeLast(100)) }
 
         try {
@@ -52,6 +60,7 @@ class AgentOrchestrator(
             var requests = 0
             var consecutiveFailures = 0
             val history = mutableListOf<String>()
+            if (approved) history += "NOTE: the user explicitly approved this task (including any send/submit step). Proceed without asking again."
             val fingerprints = mutableMapOf<String, Int>()
 
             fun reject(reason: String) {
@@ -69,7 +78,7 @@ class AgentOrchestrator(
                 requests++
                 plan.thought?.let { log(it) }
 
-                if (SafetyPolicy.requiresConfirmation(task, plan.action)) {
+                if (SafetyPolicy.requiresConfirmation(task, plan.action, approved)) {
                     val reason = (plan.action as? AgentAction.AskUser)?.reason ?: "This task may send, buy, delete, or submit something."
                     log("Paused: $reason")
                     update { it.copy(status = RunStatus.NEEDS_ASSISTANCE, phase = AgentPhase.DONE, detail = reason, target = null) }
@@ -100,15 +109,24 @@ class AgentOrchestrator(
                 if (box != null) delay(previewMs)
                 update { it.copy(phase = AgentPhase.ACTING) }
                 log("Step ${actions + 1}: $label")
-                val result = device.execute(resolved)
+                val before = observation.compactText().hashCode()
+                var result = device.execute(resolved)
                 actions++
-                if (!result.ok) { reject("$label failed: ${result.message}"); delay(400); observation = device.observe() ?: observation; continue }
+                if (!result.ok) { reject("$label failed: ${result.message}"); device.settle(800); observation = device.observe() ?: observation; continue }
                 consecutiveFailures = 0
-                history += "$label → ok"
 
                 update { it.copy(phase = AgentPhase.OBSERVING, detail = "Checking the result") }
-                delay(if (resolved is AgentAction.Wait) 150 else if (resolved is AgentAction.OpenApp) 1_200 else 600)
+                device.settle(when (resolved) { is AgentAction.OpenApp -> 3_000; is AgentAction.Wait -> 300; else -> 1_600 })
                 observation = device.observe() ?: throw IllegalStateException("The screen could not be observed after the action.")
+
+                // A touch that changed nothing may have missed: try once more with an accessibility click.
+                if (resolved is AgentAction.Tap && resolved.viaGesture && observation.compactText().hashCode() == before) {
+                    log("Nothing changed — trying a direct click")
+                    result = device.execute(resolved.copy(viaGesture = false))
+                    if (result.ok) { device.settle(1_200); observation = device.observe() ?: observation }
+                }
+                history += "$label → ${if (observation.compactText().hashCode() == before) "ok, but the screen did not change" else "ok"}"
+
                 val fingerprint = observation.compactText().hashCode().toString() + ":" + label
                 val seen = (fingerprints[fingerprint] ?: 0) + 1
                 fingerprints[fingerprint] = seen
@@ -125,9 +143,8 @@ class AgentOrchestrator(
         }
     }
 
-    /** Re-target taps on labels to their clickable parent, and fill in a scroll container when omitted. */
+    /** Fill in a scroll container when omitted. Taps keep the exact node the AI chose (its centre is touched). */
     private fun resolve(action: AgentAction, observation: UiObservation): AgentAction = when (action) {
-        is AgentAction.Tap -> observation.clickableTarget(action.nodeId)?.let { AgentAction.Tap(it.id) } ?: action
         is AgentAction.Scroll -> if (action.nodeId == null || observation.node(action.nodeId)?.scrollable != true)
             observation.nodes.firstOrNull { it.scrollable && it.enabled }?.let { AgentAction.Scroll(it.id, action.direction) } ?: action
         else action
@@ -138,6 +155,7 @@ class AgentOrchestrator(
         val id = when (action) {
             is AgentAction.Tap -> action.nodeId
             is AgentAction.TypeText -> action.nodeId
+            is AgentAction.PressEnter -> action.nodeId
             is AgentAction.Scroll -> action.nodeId
             else -> null
         } ?: return null
@@ -156,6 +174,7 @@ class AgentOrchestrator(
             is AgentAction.TypeText -> "Type \"${action.text.take(40)}\""
             is AgentAction.Scroll -> "Scroll ${action.direction.name.lowercase()}"
             AgentAction.PressBack -> "Go back"
+            is AgentAction.PressEnter -> "Press Enter"
             is AgentAction.Wait -> "Wait ${action.milliseconds} ms"
             is AgentAction.AskUser -> "Ask user"
             is AgentAction.Finish -> "Finish"

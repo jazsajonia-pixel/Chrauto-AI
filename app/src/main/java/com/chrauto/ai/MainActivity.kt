@@ -46,8 +46,10 @@ import com.chrauto.ai.accessibility.AccessibilityBridge
 import com.chrauto.ai.agent.*
 import com.chrauto.ai.data.SettingsStore
 import com.chrauto.ai.overlay.Mood
-import com.chrauto.ai.provider.DEFAULT_MODEL
-import com.chrauto.ai.provider.SUGGESTED_MODELS
+import com.chrauto.ai.provider.AiConfig
+import com.chrauto.ai.provider.ModelLister
+import com.chrauto.ai.provider.ProviderKind
+import androidx.compose.ui.platform.LocalUriHandler
 import com.chrauto.ai.ui.Brand
 import com.chrauto.ai.ui.ChrautoTheme
 import com.chrauto.ai.ui.Mascot
@@ -74,10 +76,10 @@ class MainActivity : ComponentActivity() {
                 var voiceReplies by remember { mutableStateOf(settings.voiceReplies) }
                 ChrautoScreen(
                     onOpenAccessibility = { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) },
-                    initialApiKey = settings.apiKey,
-                    initialModel = settings.model,
+                    initialConfig = settings.config(),
                     initialTask = settings.lastTask.ifBlank { DEFAULT_TASK },
-                    onSettingsChanged = { key, model -> settings.apiKey = key; settings.model = model },
+                    onConfigChanged = { settings.save(it) },
+                    loadConfig = { settings.config(it) },
                     accessibilityEnabled = accessibilityOn,
                     micGranted = micOn,
                     onRequestMic = { micPermission.launch(Manifest.permission.RECORD_AUDIO) },
@@ -125,11 +127,12 @@ typealias RunTask = suspend (task: String, apiKey: String, model: String, onStat
 @Composable
 fun ChrautoScreen(
     onOpenAccessibility: () -> Unit,
-    runTask: RunTask = { task, apiKey, model, onState -> AgentController.runAndAwait(task, apiKey.trim(), model.trim(), onState) },
-    initialApiKey: String = "",
-    initialModel: String = DEFAULT_MODEL,
+    /** Test hook; when null the shared [AgentController] runs the task with the selected provider. */
+    runTask: RunTask? = null,
+    initialConfig: AiConfig = AiConfig(),
     initialTask: String = DEFAULT_TASK,
-    onSettingsChanged: (apiKey: String, model: String) -> Unit = { _, _ -> },
+    onConfigChanged: (AiConfig) -> Unit = {},
+    loadConfig: (ProviderKind) -> AiConfig = { AiConfig(it) },
     accessibilityEnabled: Boolean = false,
     micGranted: Boolean = false,
     onRequestMic: () -> Unit = {},
@@ -142,8 +145,8 @@ fun ChrautoScreen(
 ) {
     val scope = rememberCoroutineScope()
     var task by remember { mutableStateOf(initialTask) }
-    var apiKey by remember { mutableStateOf(initialApiKey) }
-    var model by remember { mutableStateOf(initialModel) }
+    var config by remember { mutableStateOf(initialConfig) }
+    fun updateConfig(c: AiConfig) { config = c; onConfigChanged(c) }
     var state by remember { mutableStateOf(AgentState()) }
     var runJob by remember { mutableStateOf<Job?>(null) }
     val running = state.status == RunStatus.RUNNING
@@ -166,8 +169,8 @@ fun ChrautoScreen(
             Header(state)
 
             SetupCard(
-                apiKey = apiKey, onApiKey = { apiKey = it; onSettingsChanged(it, model) },
-                model = model, onModel = { model = it; onSettingsChanged(apiKey, it) },
+                config = config, onConfig = ::updateConfig,
+                onProvider = { p -> val c = loadConfig(p); config = c; onConfigChanged(c) },
                 accessibilityEnabled = accessibilityEnabled, onOpenAccessibility = onOpenAccessibility,
                 micGranted = micGranted, onRequestMic = onRequestMic,
                 floatingAssistant = floatingAssistant, onFloatingAssistantChanged = onFloatingAssistantChanged,
@@ -190,10 +193,17 @@ fun ChrautoScreen(
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Button(
-                        enabled = !running && task.isNotBlank() && apiKey.isNotBlank(),
+                        enabled = !running && task.isNotBlank() && config.isUsable,
                         modifier = Modifier.weight(1f).height(52.dp).testTag("runButton"),
                         shape = RoundedCornerShape(16.dp),
-                        onClick = { runJob = scope.launch { runTask(task, apiKey, model) { state = it } } }
+                        onClick = {
+                            val c = config
+                            runJob = scope.launch {
+                                val custom = runTask
+                                if (custom != null) custom(task, c.apiKey, c.model) { state = it }
+                                else AgentController.runAndAwait(task, c, { state = it })
+                            }
+                        }
                     ) {
                         Icon(painterResource(R.drawable.ic_play), null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Run task")
                     }
@@ -206,11 +216,14 @@ fun ChrautoScreen(
                         }
                     ) { Icon(painterResource(R.drawable.ic_stop), null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Stop") }
                 }
-                if (apiKey.isBlank()) Text("Add your Gemini API key above to start.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (!config.isUsable) Text("Add your ${config.provider.label} API key above to start.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else if (!accessibilityEnabled) Text("Tip: turn on the Accessibility service so I can see and tap the screen.", style = MaterialTheme.typography.bodySmall, color = Brand.Amber)
             }
 
-            StatusCard(state)
+            StatusCard(state, onApprove = {
+                val c = config
+                runJob = scope.launch { AgentController.runAndAwait(state.task.ifBlank { task }, c, { state = it }, approved = true) }
+            })
 
             Text(
                 "Your API key stays on this phone (encrypted) and is only sent to Google's Gemini API. It is never written to logs. Device-local keys can still be exposed on a compromised device.",
@@ -250,23 +263,22 @@ private fun SectionCard(modifier: Modifier = Modifier, content: @Composable Colu
 
 @Composable
 private fun SetupCard(
-    apiKey: String, onApiKey: (String) -> Unit, model: String, onModel: (String) -> Unit,
+    config: AiConfig, onConfig: (AiConfig) -> Unit, onProvider: (ProviderKind) -> Unit,
     accessibilityEnabled: Boolean, onOpenAccessibility: () -> Unit,
     micGranted: Boolean, onRequestMic: () -> Unit,
     floatingAssistant: Boolean, onFloatingAssistantChanged: (Boolean) -> Unit,
     voiceReplies: Boolean, onVoiceRepliesChanged: (Boolean) -> Unit,
     canStoreKey: Boolean
 ) {
-    val done = listOf(apiKey.isNotBlank(), accessibilityEnabled, micGranted).count { it }
+    val done = listOf(config.isUsable, accessibilityEnabled, micGranted).count { it }
     var expanded by rememberSaveable { mutableStateOf(done < 3) }
     val arrow by animateFloatAsState(if (expanded) 180f else 0f, label = "arrow")
-    var showKey by remember { mutableStateOf(false) }
 
     SectionCard {
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 Text(if (done == 3) "All set" else "Setup", style = MaterialTheme.typography.titleMedium)
-                Text("$done of 3 ready · ${model.ifBlank { DEFAULT_MODEL }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("$done of 3 ready · ${config.provider.label} · ${config.model}", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             LinearProgressIndicator(progress = { done / 3f }, modifier = Modifier.width(64.dp).clip(CircleShape), color = Brand.Mint, trackColor = Brand.MintSoft)
             Spacer(Modifier.width(8.dp))
@@ -274,24 +286,8 @@ private fun SetupCard(
         }
         AnimatedVisibility(expanded, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
-                StepRow(1, "Gemini API key", if (apiKey.isBlank()) "Paste a key from Google AI Studio" else if (canStoreKey) "Saved securely on this phone" else "Secure storage unavailable; key kept for this session", apiKey.isNotBlank())
-                OutlinedTextField(
-                    apiKey, onApiKey, Modifier.fillMaxWidth().testTag("apiKeyInput"),
-                    label = { Text("Gemini API key") }, singleLine = true, shape = RoundedCornerShape(14.dp),
-                    visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                    trailingIcon = {
-                        IconButton(onClick = { showKey = !showKey }) {
-                            Icon(painterResource(if (showKey) R.drawable.ic_eye_off else R.drawable.ic_eye), if (showKey) "Hide key" else "Show key", Modifier.size(20.dp))
-                        }
-                    }
-                )
-                OutlinedTextField(model, onModel, Modifier.fillMaxWidth().testTag("modelInput"), label = { Text("Gemini model") }, singleLine = true, shape = RoundedCornerShape(14.dp))
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    SUGGESTED_MODELS.forEach { m ->
-                        FilterChip(selected = model.trim() == m, onClick = { onModel(m) }, label = { Text(m, fontSize = 12.sp) }, shape = RoundedCornerShape(50))
-                    }
-                }
+                StepRow(1, "AI brain", if (!config.isUsable) "Pick a provider and paste its API key" else if (canStoreKey) "Key saved securely on this phone" else "Secure storage unavailable; key kept for this session", config.isUsable)
+                ProviderSection(config, onConfig, onProvider)
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 StepRow(2, "Accessibility service", if (accessibilityEnabled) "On — I can read and tap the screen" else "Enable \"Chrauto AI Accessibility\" in Settings", accessibilityEnabled) {
                     FilledTonalButton(onClick = onOpenAccessibility, modifier = Modifier.testTag("accessibilityButton"), shape = RoundedCornerShape(12.dp)) {
@@ -306,6 +302,115 @@ private fun SetupCard(
                 ToggleRow("Voice replies", "The assistant talks back when it starts or finishes", voiceReplies, onVoiceRepliesChanged)
             }
         }
+    }
+}
+
+@Composable
+private fun ProviderSection(config: AiConfig, onConfig: (AiConfig) -> Unit, onProvider: (ProviderKind) -> Unit) {
+    val uri = LocalUriHandler.current
+    val scope = rememberCoroutineScope()
+    var pickerOpen by remember { mutableStateOf(false) }
+    var showKey by remember { mutableStateOf(false) }
+    var models by remember(config.provider) { mutableStateOf<List<String>>(emptyList()) }
+    var modelsOpen by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(false) }
+    var modelError by remember(config.provider) { mutableStateOf<String?>(null) }
+    val p = config.provider
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Box {
+            OutlinedCard(
+                onClick = { pickerOpen = true }, modifier = Modifier.fillMaxWidth().testTag("providerPicker"),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(Modifier.padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Provider", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(p.label, style = MaterialTheme.typography.titleSmall)
+                    }
+                    PriceBadge(p.pricing)
+                    Spacer(Modifier.width(6.dp))
+                    Text("▾", color = Brand.Muted, fontSize = 18.sp)
+                }
+            }
+            DropdownMenu(pickerOpen, onDismissRequest = { pickerOpen = false }, modifier = Modifier.heightIn(max = 460.dp)) {
+                ProviderKind.entries.forEach { kind ->
+                    DropdownMenuItem(
+                        text = {
+                            Column {
+                                Text(kind.label, fontWeight = if (kind == p) FontWeight.Bold else FontWeight.Normal)
+                                Text(kind.pricing, fontSize = 12.sp, color = if (isFree(kind.pricing)) Brand.Mint else Brand.Muted)
+                            }
+                        },
+                        onClick = { pickerOpen = false; if (kind != p) onProvider(kind) }
+                    )
+                }
+            }
+        }
+
+        if (p == ProviderKind.CUSTOM) {
+            OutlinedTextField(config.baseUrl, { onConfig(config.copy(baseUrl = it)) }, Modifier.fillMaxWidth().testTag("baseUrlInput"),
+                label = { Text("Base URL (OpenAI-compatible, ends in /v1)") }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri))
+        }
+        OutlinedTextField(
+            config.apiKey, { onConfig(config.copy(apiKey = it)) }, Modifier.fillMaxWidth().testTag("apiKeyInput"),
+            label = { Text(if (p.requiresKey) "${p.label} API key" else "API key (optional)") }, singleLine = true, shape = RoundedCornerShape(14.dp),
+            visualTransformation = if (showKey) VisualTransformation.None else PasswordVisualTransformation(),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+            trailingIcon = {
+                IconButton(onClick = { showKey = !showKey }) {
+                    Icon(painterResource(if (showKey) R.drawable.ic_eye_off else R.drawable.ic_eye), if (showKey) "Hide key" else "Show key", Modifier.size(20.dp))
+                }
+            }
+        )
+        TextButton(onClick = { runCatching { uri.openUri(p.keyUrl) } }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text(if (isFree(p.pricing)) "Get a free ${p.label} key →" else "Get a ${p.label} key →", fontSize = 13.sp)
+        }
+
+        Box {
+            OutlinedTextField(
+                config.model, { onConfig(config.copy(model = it)) }, Modifier.fillMaxWidth().testTag("modelInput"),
+                label = { Text("Model") }, singleLine = true, shape = RoundedCornerShape(14.dp),
+                trailingIcon = {
+                    TextButton(enabled = !loading && (config.apiKey.isNotBlank() || !p.requiresKey), onClick = {
+                        loading = true; modelError = null
+                        scope.launch {
+                            runCatching { ModelLister.list(config) }
+                                .onSuccess { models = it; modelsOpen = it.isNotEmpty(); if (it.isEmpty()) modelError = "No chat models returned" }
+                                .onFailure { modelError = it.message ?: "Couldn't load models" }
+                            loading = false
+                        }
+                    }) { Text(if (loading) "…" else "Load", fontSize = 13.sp) }
+                }
+            )
+            DropdownMenu(modelsOpen, onDismissRequest = { modelsOpen = false }, modifier = Modifier.heightIn(max = 420.dp)) {
+                models.take(200).forEach { m ->
+                    DropdownMenuItem(text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(m, fontSize = 14.sp, modifier = Modifier.weight(1f, fill = false))
+                            if (m.endsWith(":free")) { Spacer(Modifier.width(6.dp)); PriceBadge("Free") }
+                        }
+                    }, onClick = { modelsOpen = false; onConfig(config.copy(model = m)) })
+                }
+            }
+        }
+        modelError?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error) }
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            p.suggestedModels.forEach { m ->
+                FilterChip(selected = config.model.trim() == m, onClick = { onConfig(config.copy(model = m)) }, label = { Text(m, fontSize = 12.sp) }, shape = RoundedCornerShape(50))
+            }
+        }
+    }
+}
+
+private fun isFree(pricing: String) = pricing.contains("free", ignoreCase = true)
+
+@Composable
+private fun PriceBadge(text: String) {
+    val free = isFree(text)
+    Box(Modifier.clip(RoundedCornerShape(50)).background(if (free) Brand.MintSoft else Color(0xFFF0EEF5)).padding(horizontal = 8.dp, vertical = 3.dp)) {
+        Text(if (free) text.substringBefore(" ·") else text.substringBefore(" ·"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (free) Brand.Mint else Brand.Muted, maxLines = 1)
     }
 }
 
@@ -341,7 +446,7 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onChang
 }
 
 @Composable
-private fun StatusCard(state: AgentState) {
+private fun StatusCard(state: AgentState, onApprove: () -> Unit = {}) {
     val (label, fg, bg) = when (state.status) {
         RunStatus.IDLE -> Triple("Ready", Brand.Violet, Brand.VioletSoft)
         RunStatus.RUNNING -> Triple("Working", Brand.Violet, Brand.VioletSoft)
@@ -364,6 +469,13 @@ private fun StatusCard(state: AgentState) {
                     style = MaterialTheme.typography.bodyMedium, color = Brand.Violet, maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
                 LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Brand.Violet, trackColor = Brand.VioletSoft)
+            }
+        }
+        if (state.status == RunStatus.NEEDS_ASSISTANCE) {
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Brand.AmberSoft).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("I paused before doing something important: ${state.detail}", style = MaterialTheme.typography.bodyMedium, color = Brand.Ink)
+                Button(onClick = onApprove, modifier = Modifier.testTag("approveButton"), shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Brand.Amber)) { Text("Approve & continue") }
             }
         }
         if (state.logs.isEmpty()) {

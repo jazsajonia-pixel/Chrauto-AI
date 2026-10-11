@@ -4,7 +4,8 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import com.chrauto.ai.provider.DEFAULT_MODEL
+import com.chrauto.ai.provider.AiConfig
+import com.chrauto.ai.provider.ProviderKind
 
 /** Persists settings on-device. The API key is kept in encrypted preferences and never logged. */
 class SettingsStore(context: Context) {
@@ -19,13 +20,40 @@ class SettingsStore(context: Context) {
         )
     }.getOrNull()
 
-    var apiKey: String
-        get() = secure?.getString("gemini_api_key", "").orEmpty()
-        set(value) { secure?.edit()?.putString("gemini_api_key", value.trim())?.apply() }
+    init { migrate() }
 
-    var model: String
-        get() = plain.getString("model", DEFAULT_MODEL).orEmpty().ifBlank { DEFAULT_MODEL }
-        set(value) = plain.edit().putString("model", value.trim()).apply()
+    var provider: ProviderKind
+        get() = ProviderKind.fromId(plain.getString("provider", ProviderKind.GEMINI.id))
+        set(value) = plain.edit().putString("provider", value.id).apply()
+
+    fun apiKey(p: ProviderKind): String = secure?.getString("key_${p.id}", "").orEmpty()
+    fun setApiKey(p: ProviderKind, value: String) { secure?.edit()?.putString("key_${p.id}", value.trim())?.apply() }
+
+    fun model(p: ProviderKind): String = plain.getString("model_${p.id}", p.defaultModel).orEmpty().ifBlank { p.defaultModel }
+    fun setModel(p: ProviderKind, value: String) = plain.edit().putString("model_${p.id}", value.trim()).apply()
+
+    fun baseUrl(p: ProviderKind): String = plain.getString("base_${p.id}", p.baseUrl).orEmpty().ifBlank { p.baseUrl }
+    fun setBaseUrl(p: ProviderKind, value: String) = plain.edit().putString("base_${p.id}", value.trim()).apply()
+
+    fun config(p: ProviderKind = provider) = AiConfig(p, apiKey(p), model(p), baseUrl(p))
+
+    fun save(config: AiConfig) {
+        provider = config.provider
+        setApiKey(config.provider, config.apiKey)
+        setModel(config.provider, config.model)
+        if (config.provider == ProviderKind.CUSTOM) setBaseUrl(config.provider, config.baseUrl)
+    }
+
+    /** 0.2.0 stored a single Gemini key/model. */
+    private fun migrate() {
+        val oldKey = secure?.getString("gemini_api_key", null)
+        if (!oldKey.isNullOrBlank()) {
+            secure?.edit()?.putString("key_gemini", oldKey)?.remove("gemini_api_key")?.apply()
+        }
+        plain.getString("model", null)?.let { old ->
+            plain.edit().putString("model_gemini", old).remove("model").apply()
+        }
+    }
 
     var lastTask: String
         get() = plain.getString("last_task", "").orEmpty()

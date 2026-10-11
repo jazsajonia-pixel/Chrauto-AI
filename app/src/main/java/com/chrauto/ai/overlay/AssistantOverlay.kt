@@ -124,6 +124,9 @@ class AssistantOverlay(private val context: Context) {
     private var cursorShown = false
     private var cursorAnim: ValueAnimator? = null
     private var lastTargetKey: String? = null
+    /** Difference between requested window position and where the system actually placed it (cutouts, bars). */
+    private var calibX = 0
+    private var calibY = 0
     private val cursorParams = WindowManager.LayoutParams(
         cursorSize, cursorSize,
         WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
@@ -150,6 +153,21 @@ class AssistantOverlay(private val context: Context) {
         if (attached) runCatching { wm.removeView(dock) }
         attached = false
         handler.removeCallbacksAndMessages(null)
+    }
+
+    /** Makes the floating dock ignore touches while [block] runs, so injected taps go to the app underneath. */
+    suspend fun <T> withTouchPassThrough(block: suspend () -> T): T {
+        val wasAttached = attached
+        if (wasAttached) {
+            dockParams.flags = dockParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            runCatching { wm.updateViewLayout(dock, dockParams) }
+        }
+        try { return block() } finally {
+            if (wasAttached && attached) {
+                dockParams.flags = dockParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                runCatching { wm.updateViewLayout(dock, dockParams) }
+            }
+        }
     }
 
     fun show() { hidden = false; if (!attached) attach() else dock.visibility = View.VISIBLE; refresh() }
@@ -185,6 +203,11 @@ class AssistantOverlay(private val context: Context) {
         }
         updateCursor(state, previous)
         refresh()
+        handler.removeCallbacks(ticker)
+        if (state.status == RunStatus.RUNNING) handler.postDelayed(ticker, 1_000)
+    }
+    private val ticker = object : Runnable {
+        override fun run() { if (lastState.status == RunStatus.RUNNING) { refresh(); handler.postDelayed(this, 1_000) } }
     }
 
     // ---------- Rendering ----------
@@ -204,10 +227,14 @@ class AssistantOverlay(private val context: Context) {
         }
         setStatus(statusOverride ?: when {
             listening -> "Listening… tell me what to do"
+            running && s.phase == AgentPhase.THINKING -> {
+                val secs = (System.currentTimeMillis() - s.phaseSince) / 1000
+                if (secs >= 3) "Thinking… ${secs}s" else "Thinking…"
+            }
             running -> (if (s.step > 0 && (s.phase == AgentPhase.MOVING || s.phase == AgentPhase.ACTING)) "Step ${s.step} · " else "") + s.detail.ifBlank { "Working…" }
             s.status == RunStatus.SUCCEEDED -> "Done: ${s.detail}"
             s.status == RunStatus.FAILED -> "Stuck: ${s.detail}"
-            s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs you: ${s.detail}"
+            s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs you: ${s.detail} · tap ↻ to approve"
             s.status == RunStatus.CANCELLED -> "Stopped. Tap the mic for a new task."
             else -> "Hi! Tap the mic and tell me what to do."
         }, override = false)
@@ -323,6 +350,10 @@ class AssistantOverlay(private val context: Context) {
         cursor.alpha = 0f; cursor.scaleX = 0.3f; cursor.scaleY = 0.3f
         runCatching { wm.addView(cursor, cursorParams) }.onSuccess {
             cursorShown = true
+            cursor.post {
+                val loc = IntArray(2); cursor.getLocationOnScreen(loc)
+                calibX = loc[0] - cursorParams.x; calibY = loc[1] - cursorParams.y
+            }
             cursor.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(320).setInterpolator(OvershootInterpolator(1.8f)).start()
         }
     }
@@ -338,13 +369,13 @@ class AssistantOverlay(private val context: Context) {
         if (!cursorShown) return
         cursorAnim?.cancel()
         val fromX = cursorParams.x; val fromY = cursorParams.y
-        val toX = cx - cursorSize / 2; val toY = cy - cursorSize / 2
+        val toX = cx - cursorSize / 2 - calibX; val toY = cy - cursorSize / 2 - calibY
         val dx = (toX - fromX).toFloat(); val dy = (toY - fromY).toFloat()
         val dist = hypot(dx, dy)
         cursor.lookX = if (dist > 0) dx / dist else 0f; cursor.lookY = if (dist > 0) dy / dist else 0f
         cursor.rotation = (dx / (dist + 1f)) * 12f
         cursorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = (260 + dist / density * 0.9f).toLong().coerceIn(260, 620)
+            duration = (170 + dist / density * 0.5f).toLong().coerceIn(170, 300)
             interpolator = DecelerateInterpolator(1.6f)
             addUpdateListener {
                 val f = it.animatedValue as Float
@@ -371,6 +402,10 @@ class AssistantOverlay(private val context: Context) {
     }
 
     private fun retryLast() {
+        if (lastState.status == RunStatus.NEEDS_ASSISTANCE) {
+            AgentController.approveAndContinue()?.let { setStatus(it); flashMood(Mood.SAD) } ?: speakIfEnabled("Okay, continuing.")
+            return
+        }
         val task = settings.lastTask
         if (task.isBlank()) { setStatus("No previous task yet"); return }
         AgentController.startWithSavedSettings(task)?.let { setStatus(it); flashMood(Mood.SAD) }

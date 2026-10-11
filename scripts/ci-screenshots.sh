@@ -10,6 +10,13 @@ adb exec-out screencap -p > "$OUT/01-main-setup.png"
 adb shell settings put secure enabled_accessibility_services $PKG/$PKG.accessibility.AccessibilityAgentService
 adb shell settings put secure accessibility_enabled 1
 sleep 6
+# End-to-end device-layer self test (gesture taps, stale nodes, typing + Enter).
+adb logcat -c
+adb shell am broadcast -n $PKG/.debug.SelfTestReceiver
+sleep 9
+adb exec-out screencap -p > "$OUT/00-selftest.png"
+adb logcat -d -s ChrautoSelfTest:I | tee "$OUT/selftest.txt"
+grep -q "SELFTEST done" "$OUT/selftest.txt" && ! grep -q "=FAIL" "$OUT/selftest.txt" && echo "SELFTEST OK" || { echo "SELFTEST FAILED"; touch "$OUT/SELFTEST_FAILED"; }
 adb shell input keyevent KEYCODE_HOME; sleep 3
 adb exec-out screencap -p > "$OUT/02-home-bubble.png"
 SIZE=$(adb shell wm size | grep -o '[0-9]*x[0-9]*' | tail -1); W=${SIZE%x*}; H=${SIZE#*x}
@@ -28,3 +35,4 @@ adb exec-out screencap -p > "$OUT/06-done.png"
 adb shell am start -n $PKG/.MainActivity; sleep 3
 adb exec-out screencap -p > "$OUT/07-main-after-run.png"
 ls -la "$OUT"
+[ -f "$OUT/SELFTEST_FAILED" ] && exit 1 || exit 0
