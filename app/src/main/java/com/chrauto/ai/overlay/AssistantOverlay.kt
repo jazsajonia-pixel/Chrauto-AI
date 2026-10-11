@@ -155,17 +155,31 @@ class AssistantOverlay(private val context: Context) {
         handler.removeCallbacksAndMessages(null)
     }
 
-    /** Makes the floating dock ignore touches while [block] runs, so injected taps go to the app underneath. */
-    suspend fun <T> withTouchPassThrough(block: suspend () -> T): T {
-        val wasAttached = attached
-        if (wasAttached) {
-            dockParams.flags = dockParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-            runCatching { wm.updateViewLayout(dock, dockParams) }
-        }
+    /** True if screen point (x, y) falls on the floating dock. */
+    fun covers(x: Float, y: Float): Boolean {
+        if (!attached || dock.visibility != View.VISIBLE || dock.width == 0) return false
+        val loc = IntArray(2); dock.getLocationOnScreen(loc)
+        val pad = dp(8)
+        return x >= loc[0] - pad && x <= loc[0] + dock.width + pad && y >= loc[1] - pad && y <= loc[1] + dock.height + pad
+    }
+
+    /**
+     * Lets an injected tap at (x, y) reach the app underneath: if the point is on the dock, the dock
+     * fades out and stops taking touches until the tap is done. Window flag changes apply
+     * asynchronously, so we wait a couple of frames before tapping.
+     */
+    suspend fun <T> withTouchPassThrough(x: Float, y: Float, block: suspend () -> T): T {
+        if (!covers(x, y)) return block()
+        dockParams.flags = dockParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        runCatching { wm.updateViewLayout(dock, dockParams) }
+        dock.animate().cancel(); dock.alpha = 0.15f
+        kotlinx.coroutines.delay(120)
         try { return block() } finally {
-            if (wasAttached && attached) {
+            kotlinx.coroutines.delay(60)
+            if (attached) {
                 dockParams.flags = dockParams.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
                 runCatching { wm.updateViewLayout(dock, dockParams) }
+                dock.animate().alpha(1f).setDuration(200).start()
             }
         }
     }

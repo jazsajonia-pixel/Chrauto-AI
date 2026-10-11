@@ -169,7 +169,7 @@ class AccessibilityAgentService : AccessibilityService() {
         val bounds = node?.let { n -> Rect().also { n.getBoundsInScreen(it) } } ?: lastSnapshot[action.nodeId]?.bounds
         val point = bounds?.let(::tapPoint)
         if (action.viaGesture && point != null && (node == null || node.isVisibleToUser)) {
-            val ok = overlay?.withTouchPassThrough { gestureTap(point.first, point.second) } ?: gestureTap(point.first, point.second)
+            val ok = overlay?.withTouchPassThrough(point.first, point.second) { gestureTap(point.first, point.second) } ?: gestureTap(point.first, point.second)
             if (ok) return ActionResult(true, "Tapped at ${point.first.toInt()},${point.second.toInt()}")
         }
         var target = node
