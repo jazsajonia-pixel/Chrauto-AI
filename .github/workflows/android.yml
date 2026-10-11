@@ -3,6 +3,7 @@ name: Android Debug APK
 on:
   push:
     branches: [ main, master ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
@@ -77,8 +78,18 @@ jobs:
           gh release create latest-debug chrauto-ai-debug.apk --prerelease --target "${GITHUB_SHA}" \
             --title "Chrauto AI (latest debug build)" \
             --notes "Automatic debug APK built from ${GITHUB_SHA}. Unit and instrumentation tests passed before publishing."
+      - name: Publish versioned release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          cp app/build/outputs/apk/debug/app-debug.apk "chrauto-ai-${TAG}.apk"
+          NOTES=".github/release-notes/${TAG}.md"; [ -f "$NOTES" ] || echo "Chrauto AI ${TAG}" > "$NOTES"
+          printf '\nSHA-256: `%s`\n' "$(sha256sum chrauto-ai-${TAG}.apk | cut -d' ' -f1)" >> "$NOTES"
+          gh release create "$TAG" "chrauto-ai-${TAG}.apk" --title "Chrauto AI ${TAG}" --notes-file "$NOTES" --latest
       - name: Publish UI screenshots for review
-        if: always() && github.event_name == 'push'
+        if: always() && github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
