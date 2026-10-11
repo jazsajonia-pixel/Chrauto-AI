@@ -5,6 +5,7 @@ import android.view.View
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.EditText
 import android.widget.ScrollView
+import androidx.lifecycle.Lifecycle
 import androidx.test.core.app.ActivityScenario
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.assertion.ViewAssertions.matches
@@ -27,6 +28,7 @@ class AccessibilityActionExecutorEspressoTest {
                 assertTrue(executor.execute(AgentAction.Tap("tap")).ok)
                 assertTrue(executor.execute(AgentAction.TypeText("input", "Kotlin Android")).ok)
             }
+            scenario.moveToState(Lifecycle.State.RESUMED)
             onView(withText("Tapped")).check(matches(withText("Tapped")))
             onView(withText(containsString("Kotlin Android"))).check(matches(withText(containsString("Kotlin Android"))))
         }
