@@ -2,7 +2,7 @@ package com.chrauto.ai
 
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
-import androidx.compose.ui.test.assertExists
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -45,7 +45,7 @@ class MainActivityUiTest {
         compose.onNodeWithTag("apiKeyInput").performTextInput("test-key")
         compose.onNodeWithTag("runButton").performClick()
         compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: SUCCEEDED").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Status: SUCCEEDED").assertExists()
+        compose.onNodeWithText("Status: SUCCEEDED").assertIsDisplayed()
     }
 
     @Test fun stopCancelsAnActiveRunAndReportsCancellation() {
@@ -65,7 +65,7 @@ class MainActivityUiTest {
         compose.waitUntil(2_000) { started.get() }
         compose.onNodeWithTag("stopButton").assertIsEnabled().performClick()
         compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: CANCELLED").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Status: CANCELLED").assertExists()
+        compose.onNodeWithText("Status: CANCELLED").assertIsDisplayed()
     }
 
     @Test fun accessibilitySetupCallbackIsInvoked() {
