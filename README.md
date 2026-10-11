@@ -12,6 +12,20 @@ The test suite includes JVM protocol/parser tests, Compose UI instrumentation te
 
 The provider default is `gemini-3.8-flash`, selected because the current official Gemini documentation lists it as a stable multimodal model with structured-output support. Gemini limits are project/model dependent and the free tier is not guaranteed; check AI Studio before testing. The API key is entered on the device and never committed or printed in logs.
 
+## What's new in 0.5.0 — Chron Live
+
+- **Talk over Chron (barge-in):** the mic stays open while Chron speaks. Start talking and it stops mid-sentence to listen. An echo filter ignores Chron's own voice from the speaker; with earphones a single word is enough. Toggle: **Interrupt anytime**.
+- **Live conversation:** after each reply Chron keeps listening, so you can go back and forth without saying its name. Say "bye" / "that's all", or stay quiet, to end it. A **● LIVE** badge shows when it's listening. Toggle: **Live conversation**.
+- **Faster answers:** replies stream from the AI (Gemini, OpenAI-compatible, Claude, Grok), and Chron starts speaking after the first sentence instead of waiting for the full answer. The AI connection is pre-warmed as soon as you start talking, the speech recognizer is reused between turns, and end-of-speech pauses are shorter.
+- **Instant on-phone answers (no AI call):** time, date, battery, "repeat that", "talk faster/slower", "what are you doing?", "start over", "stop talking", "bye".
+- **Hands-free approvals:** when a task pauses before sending or buying something, just say "yes" / "go ahead".
+- **Task narration:** Chron says how a voice task went ("All done…" / "I got stuck…") and keeps listening for your next step.
+- **Smoother:** music and videos duck while Chron talks, the bubble shows a voice ring that follows your voice, captions stream live, and you can **hold the bubble to talk**.
+- **Voice settings:** speaking speed (Relaxed to Rapid) and voice language (phone default, English US/PH/UK, Filipino). The chat is kept for 30 minutes so follow-ups survive app restarts, and **Clear chat** resets it.
+- **Fix:** taps on elements under the floating bubble now use a direct accessibility click, which fixes the flaky `tap_under_bubble` self-test that was failing CI.
+
+Barge-in on the loudspeaker depends on the phone's speech recognizer and echo. If Chron cuts itself off, use earphones or turn off **Interrupt anytime**.
+
 ## What's new in 0.4.0 — Chron
 
 - Say **"Chron, …"** from any app (hands-free wake word, foreground service + Quick Settings tile), or tap the mic.

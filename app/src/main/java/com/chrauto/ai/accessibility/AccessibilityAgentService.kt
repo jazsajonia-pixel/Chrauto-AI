@@ -64,6 +64,7 @@ class AccessibilityAgentService : AccessibilityService() {
         } }
         com.chrauto.ai.voice.ChronEngine.attach(this)
         s.launch { com.chrauto.ai.voice.ChronEngine.state.collect { overlay?.renderChron(it) } }
+        s.launch { com.chrauto.ai.voice.ChronEngine.level.collect { overlay?.renderLevel(it) } }
         if (SettingsStore(this).chronEnabled && !com.chrauto.ai.voice.ChronService.running) com.chrauto.ai.voice.ChronService.start(this)
     }
 
@@ -180,6 +181,12 @@ class AccessibilityAgentService : AccessibilityService() {
         val node = resolve(action.nodeId)
         val bounds = node?.let { n -> Rect().also { n.getBoundsInScreen(it) } } ?: lastSnapshot[action.nodeId]?.bounds
         val point = bounds?.let(::tapPoint)
+        // Under the floating bubble a gesture races the window-flag change, so prefer a direct accessibility click there.
+        if (point != null && overlay?.covers(point.first, point.second) == true) {
+            var t = node
+            while (t != null && !(t.isClickable || t.hasAction(AccessibilityNodeInfo.ACTION_CLICK))) t = t.parent
+            if (t != null && t.isEnabled && t.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return ActionResult(true, "Clicked (under assistant)")
+        }
         if (action.viaGesture && point != null && (node == null || node.isVisibleToUser)) {
             val ok = overlay?.withTouchPassThrough(point.first, point.second) { gestureTap(point.first, point.second) } ?: gestureTap(point.first, point.second)
             if (ok) return ActionResult(true, "Tapped at ${point.first.toInt()},${point.second.toInt()}")

@@ -71,7 +71,7 @@ class ChronService : Service() {
         ChronEngine.enableWake(this)
         ContextCompat.registerReceiver(this, screen, IntentFilter().apply { addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF) }, ContextCompat.RECEIVER_NOT_EXPORTED)
         scope.launch {
-            ChronEngine.state.map { it.mode to it.error }.distinctUntilChanged().collect { nm.notify(ID, notification(ChronEngine.state.value)) }
+            ChronEngine.state.map { Triple(it.mode, it.error, it.live to it.duplex) }.distinctUntilChanged().collect { nm.notify(ID, notification(ChronEngine.state.value)) }
         }
     }
 
@@ -95,9 +95,9 @@ class ChronService : Service() {
     private fun notification(s: ChronEngine.State): Notification {
         val name = SettingsStore(this).wakeName
         val text = when (s.mode) {
-            ChronEngine.Mode.ACTIVE -> "Listening…"
+            ChronEngine.Mode.ACTIVE -> if (s.live) "Live · listening…" else "Listening…"
             ChronEngine.Mode.THINKING -> "Thinking…"
-            ChronEngine.Mode.SPEAKING -> "Talking"
+            ChronEngine.Mode.SPEAKING -> if (s.duplex) "Talking · just speak to interrupt" else "Talking"
             ChronEngine.Mode.PASSIVE -> "Say “$name, …” anytime"
             ChronEngine.Mode.OFF -> s.error ?: "Paused while the screen is off"
         }

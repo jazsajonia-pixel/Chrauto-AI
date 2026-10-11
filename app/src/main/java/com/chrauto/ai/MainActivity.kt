@@ -361,7 +361,14 @@ private fun ChronCard(
     chron: ChronEngine.State, enabled: Boolean, onEnabled: (Boolean) -> Unit,
     initialWakeName: String, onWakeName: (String) -> Unit, onTalkNow: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val store = remember { SettingsStore(context) }
     var wake by remember { mutableStateOf(initialWakeName) }
+    var live by remember { mutableStateOf(store.liveConversation) }
+    var barge by remember { mutableStateOf(store.bargeIn) }
+    var rate by remember { mutableFloatStateOf(store.speechRate) }
+    var language by remember { mutableStateOf(store.voiceLanguage) }
+    var showVoice by rememberSaveable { mutableStateOf(false) }
     val name = wake.ifBlank { "Chron" }
     val mood = when (chron.mode) {
         ChronEngine.Mode.ACTIVE -> Mood.LISTENING
@@ -374,13 +381,21 @@ private fun ChronCard(
             Mascot(mood, 46.dp)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                Text("Talk to $name", style = MaterialTheme.typography.titleMedium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text("Talk to $name", style = MaterialTheme.typography.titleMedium)
+                    if (chron.live) {
+                        Spacer(Modifier.width(8.dp))
+                        Box(Modifier.clip(RoundedCornerShape(50)).background(Brand.CoralSoft).padding(horizontal = 8.dp, vertical = 2.dp).testTag("liveBadge")) {
+                            Text("● LIVE", color = Brand.Coral, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
                 Text(
                     when (chron.mode) {
                         ChronEngine.Mode.PASSIVE -> "Listening for “$name”…"
-                        ChronEngine.Mode.ACTIVE -> chron.partial.ifBlank { "I'm listening…" }
-                        ChronEngine.Mode.THINKING -> "Thinking about “${chron.heard}”"
-                        ChronEngine.Mode.SPEAKING -> "Talking…"
+                        ChronEngine.Mode.ACTIVE -> chron.partial.ifBlank { if (chron.live) "Go ahead, I'm listening…" else "I'm listening…" }
+                        ChronEngine.Mode.THINKING -> chron.reply.ifBlank { "Thinking about “${chron.heard}”" }
+                        ChronEngine.Mode.SPEAKING -> if (chron.duplex) "Talking… just speak to interrupt" else "Talking…"
                         ChronEngine.Mode.OFF -> chron.error ?: if (enabled) "Starting…" else "Say “$name, open YouTube” or ask a question"
                     },
                     style = MaterialTheme.typography.bodySmall, color = if (chron.mode == ChronEngine.Mode.ACTIVE) Brand.Violet else MaterialTheme.colorScheme.onSurfaceVariant,
@@ -389,19 +404,49 @@ private fun ChronCard(
             }
             FilledTonalButton(onClick = onTalkNow, shape = RoundedCornerShape(14.dp), modifier = Modifier.testTag("talkButton")) {
                 Icon(painterResource(R.drawable.ic_mic), null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp))
-                Text(if (chron.mode == ChronEngine.Mode.ACTIVE) "Stop" else "Talk")
+                Text(when (chron.mode) { ChronEngine.Mode.ACTIVE -> "Stop"; ChronEngine.Mode.SPEAKING -> "Interrupt"; else -> "Talk" })
             }
         }
         ToggleRow("Hands-free “$name”", "Listens for its name, even in other apps. Shows a notification while on.", enabled, onEnabled, Modifier.testTag("chronSwitch"))
         AnimatedVisibility(enabled) {
             OutlinedTextField(wake, { wake = it.take(16); onWakeName(wake) }, Modifier.fillMaxWidth(), label = { Text("Wake name") }, singleLine = true,
-                shape = RoundedCornerShape(14.dp), supportingText = { Text("Tip: add the “$name” tile in Quick Settings to switch it on and off fast.") })
+                shape = RoundedCornerShape(14.dp), supportingText = { Text("Tip: add the “$name” tile in Quick Settings, or hold the floating bubble to talk.") })
+        }
+        ToggleRow("Live conversation", "Keeps listening after each reply, so you can chat back and forth without saying “$name”.", live,
+            { live = it; store.liveConversation = it }, Modifier.testTag("liveSwitch"))
+        ToggleRow("Interrupt anytime", "Talk over $name and it stops to listen. Works best with earphones.", barge,
+            { barge = it; store.bargeIn = it }, Modifier.testTag("bargeSwitch"))
+        TextButton(onClick = { showVoice = !showVoice }, contentPadding = PaddingValues(horizontal = 4.dp)) {
+            Text(if (showVoice) "Hide voice settings" else "Voice settings (speed, language)", fontSize = 13.sp)
+        }
+        AnimatedVisibility(showVoice) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Speaking speed", style = MaterialTheme.typography.titleSmall)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Relaxed" to 0.9f, "Normal" to 1.1f, "Quick" to 1.35f, "Rapid" to 1.6f).forEach { (label, v) ->
+                        FilterChip(selected = kotlin.math.abs(rate - v) < 0.08f, onClick = {
+                            rate = v; store.speechRate = v; ChronEngine.applyVoiceSettings()
+                        }, label = { Text(label, fontSize = 12.sp) }, shape = RoundedCornerShape(50))
+                    }
+                }
+                Text("Voice language", style = MaterialTheme.typography.titleSmall)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("Phone default" to "", "English (US)" to "en-US", "English (PH)" to "en-PH", "Filipino" to "fil-PH", "English (UK)" to "en-GB").forEach { (label, tag) ->
+                        FilterChip(selected = language == tag, onClick = {
+                            language = tag; store.voiceLanguage = tag; ChronEngine.applyVoiceSettings()
+                        }, label = { Text(label, fontSize = 12.sp) }, shape = RoundedCornerShape(50))
+                    }
+                }
+            }
         }
         if (chron.conversation.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 chron.conversation.takeLast(4).forEach { (you, bot) ->
-                    ChatBubble(you, mine = true)
+                    if (you.isNotBlank()) ChatBubble(you, mine = true)
                     ChatBubble(bot, mine = false)
+                }
+                TextButton(onClick = { ChronEngine.clearConversation() }, contentPadding = PaddingValues(horizontal = 4.dp), modifier = Modifier.testTag("clearChat")) {
+                    Text("Clear chat", fontSize = 13.sp)
                 }
             }
         }

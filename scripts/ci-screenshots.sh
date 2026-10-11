@@ -40,6 +40,10 @@ adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron listening; sleep 1
 adb exec-out screencap -p > "$OUT/08-chron-listening.png"
 adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron reply; sleep 1.2
 adb exec-out screencap -p > "$OUT/09-chron-reply.png"
+adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron live; sleep 1.2
+adb exec-out screencap -p > "$OUT/09b-chron-live.png"
+adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron duplex; sleep 1.2
+adb exec-out screencap -p > "$OUT/09c-chron-duplex.png"
 adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 2; adb shell input swipe 540 1500 540 600 300; sleep 1
 adb exec-out screencap -p > "$OUT/10-main-chron-card.png"
 adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron off

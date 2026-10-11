@@ -32,7 +32,6 @@ import com.chrauto.ai.agent.AgentState
 import com.chrauto.ai.agent.RunStatus
 import com.chrauto.ai.data.SettingsStore
 import com.chrauto.ai.voice.ChronEngine
-import com.chrauto.ai.voice.Speaker
 import kotlin.math.abs
 import kotlin.math.hypot
 
@@ -74,7 +73,9 @@ class AssistantOverlay(private val context: Context) {
         setPadding(dp(4), 0, dp(4), dp(6))
     }
     private val micBtn = roundButton(R.drawable.ic_mic, "Talk to Chron", MascotColors.VIOLET) { ChronEngine.listenNow(context) }
-    private val stopBtn = roundButton(R.drawable.ic_stop, "Stop task", MascotColors.CORAL) { AgentController.stop(); speakIfEnabled("Okay, stopped.") }
+    private val stopBtn = roundButton(R.drawable.ic_stop, "Stop", MascotColors.CORAL) {
+        if (AgentController.isRunning) { AgentController.stop(); ChronEngine.announce("Okay, stopped.") } else ChronEngine.hush()
+    }
     private val retryBtn = roundButton(R.drawable.ic_replay, "Repeat last task", 0xFF4C9AFF.toInt()) { retryLast() }
     private val appBtn = roundButton(R.drawable.ic_home, "Open Chrauto", 0xFF8E7CC3.toInt()) { openApp() }
     private val hideBtn = roundButton(R.drawable.ic_close, "Hide assistant", 0xFF9AA0B4.toInt()) { hide() }
@@ -170,7 +171,7 @@ class AssistantOverlay(private val context: Context) {
         dockParams.flags = dockParams.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
         runCatching { wm.updateViewLayout(dock, dockParams) }
         dock.animate().cancel(); dock.alpha = 0.15f
-        kotlinx.coroutines.delay(120)
+        kotlinx.coroutines.delay(200)
         try { return block() } finally {
             kotlinx.coroutines.delay(60)
             if (attached) {
@@ -199,15 +200,14 @@ class AssistantOverlay(private val context: Context) {
         if (state.status == RunStatus.RUNNING && previous.status != RunStatus.RUNNING) {
             statusOverride = null
             if (hidden) show()
-            if (!ChronEngine.recentlySpoke()) speakIfEnabled("On it!")
         }
         if (previous.status == RunStatus.RUNNING && state.status != RunStatus.RUNNING) {
             // Keep the footprint small: tuck the panel away a few seconds after a run ends.
             handler.removeCallbacks(autoCollapse); handler.postDelayed(autoCollapse, 4_500)
+            // Chron narrates the result out loud (see ChronEngine); the bubble just reacts.
             when (state.status) {
-                RunStatus.SUCCEEDED -> { flashMood(Mood.HAPPY); speakIfEnabled("All done! ${state.detail}") }
-                RunStatus.FAILED -> { flashMood(Mood.SAD); speakIfEnabled("Sorry, I got stuck.") }
-                RunStatus.NEEDS_ASSISTANCE -> { flashMood(Mood.SAD); speakIfEnabled("I need your okay before I continue.") }
+                RunStatus.SUCCEEDED -> flashMood(Mood.HAPPY)
+                RunStatus.FAILED, RunStatus.NEEDS_ASSISTANCE -> flashMood(Mood.SAD)
                 else -> Unit
             }
         }
@@ -237,10 +237,11 @@ class AssistantOverlay(private val context: Context) {
             s.phase == AgentPhase.THINKING || s.phase == AgentPhase.OBSERVING -> Mood.THINKING
             else -> Mood.WORKING
         }
+        val live = if (chron.live) "● " else ""
         setStatus(statusOverride ?: when {
-            listening -> chron.partial.takeIf { it.isNotBlank() }?.let { "“$it”" } ?: "Listening… tell me what to do"
-            chron.mode == ChronEngine.Mode.THINKING -> "“${chron.heard}” · thinking…"
-            chron.mode == ChronEngine.Mode.SPEAKING -> chron.reply
+            listening -> live + (chron.partial.takeIf { it.isNotBlank() }?.let { "“$it”" } ?: if (chron.live) "Listening… go ahead" else "Listening… tell me what to do")
+            chron.mode == ChronEngine.Mode.THINKING -> live + (chron.reply.takeIf { it.isNotBlank() } ?: "“${chron.heard}” · thinking…")
+            chron.mode == ChronEngine.Mode.SPEAKING -> live + chron.reply.ifBlank { "…" }
             running && s.phase == AgentPhase.THINKING -> {
                 val secs = (System.currentTimeMillis() - s.phaseSince) / 1000
                 if (secs >= 3) "Thinking… ${secs}s" else "Thinking…"
@@ -254,7 +255,9 @@ class AssistantOverlay(private val context: Context) {
             else -> "Hi! Tap the mic and tell me what to do."
         }, override = false)
         micBtn.tint(if (listening) MascotColors.PINK else MascotColors.VIOLET)
-        stopBtn.isEnabled = running; stopBtn.alpha = if (running) 1f else 0.35f
+        micBtn.contentDescription = if (chron.mode == ChronEngine.Mode.SPEAKING) "Interrupt and talk" else "Talk to Chron"
+        val canStop = running || chron.mode == ChronEngine.Mode.SPEAKING
+        stopBtn.isEnabled = canStop; stopBtn.alpha = if (canStop) 1f else 0.35f
         retryBtn.isEnabled = !running && settings.lastTask.isNotBlank(); retryBtn.alpha = if (retryBtn.isEnabled) 1f else 0.35f
     }
 
@@ -310,16 +313,19 @@ class AssistantOverlay(private val context: Context) {
 
     private fun setupBubbleTouch() {
         val slop = ViewConfiguration.get(context).scaledTouchSlop
-        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var dragging = false
+        var downX = 0f; var downY = 0f; var startX = 0; var startY = 0; var dragging = false; var held = false
+        // Hold the bubble to talk to Chron right away.
+        val holdToTalk = Runnable { if (!dragging) { held = true; boing(); if (!expanded) { expand(); expandedByVoice = true }; ChronEngine.listenNow(context) } }
         bubble.setOnTouchListener { v, e ->
             when (e.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    downX = e.rawX; downY = e.rawY; startX = dockParams.x; startY = dockParams.y; dragging = false
+                    downX = e.rawX; downY = e.rawY; startX = dockParams.x; startY = dockParams.y; dragging = false; held = false
+                    handler.postDelayed(holdToTalk, ViewConfiguration.getLongPressTimeout().toLong())
                     v.animate().scaleX(0.9f).scaleY(0.9f).setDuration(90).start(); true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = e.rawX - downX; val dy = e.rawY - downY
-                    if (!dragging && hypot(dx, dy) > slop) dragging = true
+                    if (!dragging && hypot(dx, dy) > slop) { dragging = true; handler.removeCallbacks(holdToTalk) }
                     if (dragging) {
                         val metrics = context.resources.displayMetrics
                         dockParams.x = (startX - dx.toInt()).coerceIn(0, metrics.widthPixels - dp(70))
@@ -330,9 +336,10 @@ class AssistantOverlay(private val context: Context) {
                     true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    handler.removeCallbacks(holdToTalk)
                     v.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
                     bubble.lookX = 0f; bubble.lookY = 0f
-                    if (!dragging && e.actionMasked == MotionEvent.ACTION_UP && abs(e.rawX - downX) < slop) { v.performClick(); toggle() }
+                    if (!dragging && !held && e.actionMasked == MotionEvent.ACTION_UP && abs(e.rawX - downX) < slop) { v.performClick(); toggle() }
                     true
                 }
                 else -> false
@@ -408,7 +415,7 @@ class AssistantOverlay(private val context: Context) {
     // ---------- Actions ----------
     private fun retryLast() {
         if (lastState.status == RunStatus.NEEDS_ASSISTANCE) {
-            AgentController.approveAndContinue()?.let { setStatus(it); flashMood(Mood.SAD) } ?: speakIfEnabled("Okay, continuing.")
+            AgentController.approveAndContinue()?.let { setStatus(it); flashMood(Mood.SAD) } ?: ChronEngine.announce("Okay, continuing.")
             return
         }
         val task = settings.lastTask
@@ -424,13 +431,14 @@ class AssistantOverlay(private val context: Context) {
         collapse()
     }
 
-    private fun speakIfEnabled(text: String) { if (settings.voiceReplies) Speaker.say(text) }
+    /** Mic level from Chron (0..1) for the bubble's voice ring. */
+    fun renderLevel(level: Float) { bubble.level = level }
 
     /** Called for every Chron voice state change. */
     fun renderChron(state: ChronEngine.State) {
         val prev = chron
         chron = state
-        bubble.earOn = state.mode == ChronEngine.Mode.PASSIVE
+        bubble.earOn = state.mode == ChronEngine.Mode.PASSIVE || state.duplex
         if (state.mode == ChronEngine.Mode.ACTIVE && prev.mode != ChronEngine.Mode.ACTIVE) {
             if (hidden) show()
             if (!expanded) { expand(); expandedByVoice = true }

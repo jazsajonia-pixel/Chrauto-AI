@@ -80,6 +80,39 @@ class SettingsStore(context: Context) {
         get() = plain.getBoolean("chron_screen_off_pause", true)
         set(value) = plain.edit().putBoolean("chron_screen_off_pause", value).apply()
 
+    /** Live conversation: after each reply Chron keeps listening for follow-ups without its name. */
+    var liveConversation: Boolean
+        get() = plain.getBoolean("chron_live", true)
+        set(value) = plain.edit().putBoolean("chron_live", value).apply()
+
+    /** Keep the mic open while Chron talks so you can interrupt it. */
+    var bargeIn: Boolean
+        get() = plain.getBoolean("chron_barge_in", true)
+        set(value) = plain.edit().putBoolean("chron_barge_in", value).apply()
+
+    var speechRate: Float
+        get() = plain.getFloat("chron_rate", 1.1f)
+        set(value) = plain.edit().putFloat("chron_rate", value).apply()
+
+    /** "" = phone language; otherwise a BCP-47 tag such as "en-US", "en-PH", "fil-PH". */
+    var voiceLanguage: String
+        get() = plain.getString("chron_language", "").orEmpty()
+        set(value) = plain.edit().putString("chron_language", value.trim()).apply()
+
+    /** Recent Chron chat (user, reply), kept for 30 minutes so follow-ups survive app restarts. */
+    fun chatHistory(maxAgeMs: Long = 30 * 60_000L): List<Pair<String, String>> = runCatching {
+        val o = org.json.JSONObject(plain.getString("chron_chat", "{}") ?: "{}")
+        if (System.currentTimeMillis() - o.optLong("at", 0) > maxAgeMs) return emptyList()
+        val a = o.optJSONArray("turns") ?: return emptyList()
+        (0 until a.length()).map { a.getJSONArray(it).let { t -> t.getString(0) to t.getString(1) } }
+    }.getOrDefault(emptyList())
+
+    fun saveChatHistory(turns: List<Pair<String, String>>) {
+        val a = org.json.JSONArray()
+        turns.takeLast(10).forEach { (u, r) -> a.put(org.json.JSONArray().put(u).put(r)) }
+        plain.edit().putString("chron_chat", org.json.JSONObject().put("at", System.currentTimeMillis()).put("turns", a).toString()).apply()
+    }
+
     // ---- Task history & favourites ----
     val recents: List<String> get() = readList("recent_tasks")
     val favorites: List<String> get() = readList("favorite_tasks")

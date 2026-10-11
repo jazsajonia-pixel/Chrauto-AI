@@ -3,7 +3,9 @@ package com.chrauto.ai.provider
 import com.chrauto.ai.agent.UiObservation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -199,6 +201,82 @@ internal object Http {
         }
     }
 
+    /**
+     * POSTs [body] and reads a Server-Sent Events stream, passing each `data:` payload through [parse]
+     * and every non-empty text piece to [onDelta]. Retries once only if nothing was received yet.
+     */
+    suspend fun streamText(
+        label: String,
+        url: String,
+        headers: Map<String, String>,
+        body: JSONObject,
+        parse: (String) -> String?,
+        onDelta: (String) -> Unit,
+        timeoutMs: Int = 30_000
+    ): String = withContext(Dispatchers.IO) {
+        val out = StringBuilder()
+        var attempt = 0
+        while (true) {
+            try {
+                val c = URL(url).openConnection() as HttpURLConnection
+                try {
+                    c.requestMethod = "POST"
+                    c.connectTimeout = 10_000
+                    c.readTimeout = timeoutMs
+                    headers.forEach { (k, v) -> c.setRequestProperty(k, v) }
+                    c.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    c.setRequestProperty("Accept", "text/event-stream")
+                    c.doOutput = true
+                    c.outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                    val code = c.responseCode
+                    if (code !in 200..299) {
+                        val text = c.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                        throw ProviderHttpException(code, friendly(label, code, errorMessage(text)))
+                    }
+                    c.inputStream.bufferedReader(Charsets.UTF_8).use { reader ->
+                        while (true) {
+                            coroutineContext.ensureActive()
+                            val line = reader.readLine() ?: break
+                            val data = Sse.data(line) ?: continue
+                            val piece = runCatching { parse(data) }.getOrNull()
+                            if (!piece.isNullOrEmpty()) { out.append(piece); onDelta(piece) }
+                        }
+                    }
+                    return@withContext out.toString()
+                } catch (e: IOException) {
+                    c.disconnect(); throw e
+                }
+            } catch (e: ProviderHttpException) {
+                if (out.isNotEmpty() || attempt >= 1 || (e.code != 429 && e.code < 500)) throw e
+            } catch (e: SocketTimeoutException) {
+                if (out.isNotEmpty()) return@withContext out.toString()
+                if (attempt >= 1) throw IOException("$label took too long to answer")
+            } catch (e: IOException) {
+                if (out.isNotEmpty()) return@withContext out.toString()
+                if (attempt >= 1) throw IOException("Network problem talking to $label: ${e.message}")
+            }
+            attempt++
+            delay(600)
+        }
+        @Suppress("UNREACHABLE_CODE")
+        out.toString()
+    }
+
+    /** Streams if possible; if the stream fails before any text arrives (unsupported, 400…), uses [fallback]. */
+    suspend fun streamWithFallback(stream: suspend () -> String, fallback: suspend () -> String): Result<String> = runCatching {
+        try {
+            stream().also { if (it.isBlank()) error("empty stream") }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: ProviderHttpException) {
+            if (e.code == 401 || e.code == 403 || e.code == 429) throw e
+            fallback()
+        } catch (e: Exception) {
+            // streamText only fails before any text arrived, so retrying without streaming can't duplicate speech.
+            fallback()
+        }
+    }
+
     /** Fire-and-forget connection warm-up (DNS + TLS) so the first AI call is faster. */
     suspend fun warm(url: String) = withContext(Dispatchers.IO) {
         runCatching {
@@ -219,7 +297,7 @@ internal object Http {
         }
     }.getOrNull()?.takeIf { it.isNotBlank() }?.take(300) ?: body.take(300)
 
-    private fun friendly(label: String, code: Int, message: String) = when (code) {
+    fun friendly(label: String, code: Int, message: String) = when (code) {
         401, 403 -> "$label rejected the API key (HTTP $code): $message"
         404 -> "$label couldn't find that model (HTTP 404): $message"
         429 -> "$label rate limit or quota reached (HTTP 429). Wait a moment or pick another model/provider. $message"
@@ -261,6 +339,49 @@ object ModelLister {
     }
 }
 
+/** Parsers for the streaming (Server-Sent Events) formats of each API. Pure functions, unit-tested. */
+object Sse {
+    /** The payload of an SSE `data:` line, or null for comments, events, blank lines and `[DONE]`. */
+    fun data(line: String): String? {
+        if (!line.startsWith("data:")) return null
+        val d = line.removePrefix("data:").trim()
+        return d.takeIf { it.isNotEmpty() && it != "[DONE]" }
+    }
+
+    private fun JSONObject.str(key: String): String? = if (isNull(key)) null else optString(key).takeIf { it.isNotEmpty() }
+
+    /** OpenAI Chat Completions (and Groq, OpenRouter, Mistral, Cerebras, NVIDIA, DeepSeek, Ollama…). */
+    fun openAiDelta(json: String): String? {
+        val delta = JSONObject(json).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: return null
+        return delta.str("content")
+    }
+
+    /** Gemini `streamGenerateContent?alt=sse`: skips "thought" parts. */
+    fun geminiDelta(json: String): String? {
+        val parts = JSONObject(json).optJSONArray("candidates")?.optJSONObject(0)?.optJSONObject("content")?.optJSONArray("parts") ?: return null
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val p = parts.optJSONObject(i) ?: continue
+            if (!p.optBoolean("thought", false)) p.str("text")?.let(sb::append)
+        }
+        return sb.toString().takeIf { it.isNotEmpty() }
+    }
+
+    /** Anthropic Messages streaming: only `content_block_delta` / `text_delta` events carry text. */
+    fun anthropicDelta(json: String): String? {
+        val o = JSONObject(json)
+        if (o.optString("type") != "content_block_delta") return null
+        val d = o.optJSONObject("delta") ?: return null
+        return if (d.optString("type") == "text_delta") d.str("text") else null
+    }
+
+    /** OpenAI Responses API streaming (xAI): `response.output_text.delta`. */
+    fun responsesDelta(json: String): String? {
+        val o = JSONObject(json)
+        return if (o.optString("type") == "response.output_text.delta") o.str("delta") else null
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Adapters
 // ---------------------------------------------------------------------------------------------
@@ -292,25 +413,42 @@ class OpenAiChatProvider(
         }
     }
 
-    override suspend fun warmUp() = Http.warm("$baseUrl/models")
-
-    private suspend fun call(task: String, observation: UiObservation, history: List<String>) =
-        complete(PromptBuilder.system, PromptBuilder.user(task, observation, history, installedApps))
-
-    private suspend fun complete(system: String, user: String): String {
+    override suspend fun chatStream(system: String, user: String, onDelta: (String) -> Unit): Result<String> {
+        if (kind.requiresKey && apiKey.isBlank()) return Result.failure(IllegalStateException("${kind.label} API key is missing"))
         val body = JSONObject().apply {
             put("model", model)
             put("messages", JSONArray()
                 .put(JSONObject().put("role", "system").put("content", system))
                 .put(JSONObject().put("role", "user").put("content", user)))
-            if (jsonMode) put("response_format", JSONObject().put("type", "json_object"))
+            put("stream", true)
+            put("temperature", 0.7)
+        }
+        return Http.streamWithFallback(
+            stream = { Http.streamText(kind.label, "$baseUrl/chat/completions", headers(), body, Sse::openAiDelta, onDelta) },
+            fallback = { complete(system, user, json = false).also(onDelta) }
+        )
+    }
+
+    override suspend fun warmUp() = Http.warm("$baseUrl/models")
+
+    private fun headers() = buildMap {
+        if (apiKey.isNotBlank()) put("Authorization", "Bearer $apiKey")
+        if (kind == ProviderKind.OPENROUTER) { put("HTTP-Referer", "https://github.com/jazsajonia-pixel/Chrauto-AI"); put("X-Title", "Chrauto AI") }
+    }
+
+    private suspend fun call(task: String, observation: UiObservation, history: List<String>) =
+        complete(PromptBuilder.system, PromptBuilder.user(task, observation, history, installedApps))
+
+    private suspend fun complete(system: String, user: String, json: Boolean = jsonMode): String {
+        val body = JSONObject().apply {
+            put("model", model)
+            put("messages", JSONArray()
+                .put(JSONObject().put("role", "system").put("content", system))
+                .put(JSONObject().put("role", "user").put("content", user)))
+            if (json) put("response_format", JSONObject().put("type", "json_object"))
             put("stream", false)
         }
-        val headers = buildMap {
-            if (apiKey.isNotBlank()) put("Authorization", "Bearer $apiKey")
-            if (kind == ProviderKind.OPENROUTER) { put("HTTP-Referer", "https://github.com/jazsajonia-pixel/Chrauto-AI"); put("X-Title", "Chrauto AI") }
-        }
-        val root = JSONObject(Http.request(kind.label, "$baseUrl/chat/completions", headers, body))
+        val root = JSONObject(Http.request(kind.label, "$baseUrl/chat/completions", headers(), body))
         val choice = root.optJSONArray("choices")?.optJSONObject(0) ?: error("${kind.label} returned no choices")
         val message = choice.optJSONObject("message") ?: error("${kind.label} returned an empty message")
         return message.optString("content").ifBlank { message.optString("reasoning_content") }
@@ -342,18 +480,28 @@ class OpenAiResponsesProvider(
         }
     }
 
+    override suspend fun chatStream(system: String, user: String, onDelta: (String) -> Unit): Result<String> {
+        val body = JSONObject().apply {
+            put("model", model); put("instructions", system); put("input", user); put("store", false); put("stream", true)
+        }
+        return Http.streamWithFallback(
+            stream = { Http.streamText(kind.label, "$baseUrl/responses", mapOf("Authorization" to "Bearer $apiKey"), body, Sse::responsesDelta, onDelta) },
+            fallback = { complete(system, user, json = false).also(onDelta) }
+        )
+    }
+
     override suspend fun warmUp() = Http.warm("$baseUrl/models")
 
     private suspend fun call(task: String, observation: UiObservation, history: List<String>) =
         complete(PromptBuilder.system, PromptBuilder.user(task, observation, history, installedApps))
 
-    private suspend fun complete(system: String, user: String): String {
+    private suspend fun complete(system: String, user: String, json: Boolean = jsonMode): String {
         val body = JSONObject().apply {
             put("model", model)
             put("instructions", system)
             put("input", user)
             put("store", false)
-            if (jsonMode) put("text", JSONObject().put("format", JSONObject().put("type", "json_object")))
+            if (json) put("text", JSONObject().put("format", JSONObject().put("type", "json_object")))
         }
         val root = JSONObject(Http.request(kind.label, "$baseUrl/responses", mapOf("Authorization" to "Bearer $apiKey"), body))
         root.optString("output_text").takeIf { it.isNotBlank() }?.let { return it }
@@ -383,6 +531,18 @@ class AnthropicProvider(
     }
 
     override suspend fun chat(system: String, user: String) = runCatching { complete(system, user) }
+
+    override suspend fun chatStream(system: String, user: String, onDelta: (String) -> Unit): Result<String> {
+        if (apiKey.isBlank()) return Result.failure(IllegalStateException("Anthropic API key is missing"))
+        val body = JSONObject().apply {
+            put("model", model); put("max_tokens", 700); put("system", system); put("stream", true)
+            put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", user)))
+        }
+        return Http.streamWithFallback(
+            stream = { Http.streamText("Anthropic", "$baseUrl/messages", mapOf("x-api-key" to apiKey, "anthropic-version" to "2023-06-01"), body, Sse::anthropicDelta, onDelta) },
+            fallback = { complete(system, user).also(onDelta) }
+        )
+    }
 
     override suspend fun warmUp() = Http.warm("$baseUrl/models")
 

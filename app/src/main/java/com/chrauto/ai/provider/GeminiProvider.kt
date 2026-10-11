@@ -13,6 +13,13 @@ interface AiProvider {
     suspend fun plan(task: String, observation: UiObservation, history: List<String> = emptyList()): Result<ActionPlan>
     /** Free-form completion used by the Chron voice assistant (expects a JSON reply). */
     suspend fun chat(system: String, user: String): Result<String> = Result.failure(UnsupportedOperationException("chat not supported"))
+    /**
+     * Streams a plain-text reply for the live voice assistant, calling [onDelta] with each new piece
+     * of text (on a background thread). Returns the full text. Falls back to [chat] when a provider
+     * can't stream.
+     */
+    suspend fun chatStream(system: String, user: String, onDelta: (String) -> Unit): Result<String> =
+        chat(system, user).onSuccess(onDelta)
     /** Opens the TLS connection early so the first real request is faster. */
     suspend fun warmUp() {}
 }
@@ -49,6 +56,26 @@ class GeminiProvider(
             })
         }
         extractText(Http.request("Gemini", "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent", mapOf("x-goog-api-key" to apiKey), request, timeoutMs))
+    }
+
+    override suspend fun chatStream(system: String, user: String, onDelta: (String) -> Unit): Result<String> {
+        val modelId = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
+        fun body() = JSONObject().apply {
+            put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", system))))
+            put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", user)))))
+            put("generationConfig", JSONObject().apply {
+                put("temperature", 0.7)
+                put("maxOutputTokens", 600)
+                thinking?.let { put("thinkingConfig", it) }
+            })
+        }
+        return Http.streamWithFallback(
+            stream = {
+                val url = "https://generativelanguage.googleapis.com/v1beta/models/$modelId:streamGenerateContent?alt=sse"
+                Http.streamText("Gemini", url, mapOf("x-goog-api-key" to apiKey), body(), Sse::geminiDelta, onDelta)
+            },
+            fallback = { chat(system, user).getOrThrow().also(onDelta) }
+        )
     }
 
     override suspend fun warmUp() = Http.warm("https://generativelanguage.googleapis.com/")

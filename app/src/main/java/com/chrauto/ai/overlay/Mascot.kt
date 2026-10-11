@@ -154,6 +154,10 @@ open class MascotView(context: Context) : View(context) {
     /** Small mint "ear" shown while Chron is listening for its name. */
     var earOn = false
         set(value) { if (field != value) { field = value; invalidate() } }
+    /** Microphone level 0..1: draws a soft ring that pulses with your voice while Chron listens. */
+    var level = 0f
+    private var shownLevel = 0f
+    private val voiceRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; color = MascotColors.PINK }
     private val ear = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = MascotColors.MINT }
     private val earRing = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private var lastFrame = 0L
@@ -179,6 +183,13 @@ open class MascotView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         val r = min(width, height) * 0.36f
         val bob = r * 0.06f * sin(clock * 2.4f)
+        shownLevel += (level - shownLevel) * 0.35f
+        if (shownLevel > 0.02f) {
+            val rr = r * (1.08f + 0.28f * shownLevel)
+            voiceRing.strokeWidth = r * (0.06f + 0.08f * shownLevel)
+            voiceRing.alpha = (90 + 140 * shownLevel).toInt().coerceAtMost(230)
+            canvas.drawCircle(width / 2f, height / 2f + r * 0.08f + bob, rr, voiceRing)
+        }
         MascotPainter.draw(canvas, width / 2f, height / 2f + r * 0.08f + bob, r, mood, clock, blink, lookX, lookY)
         if (earOn) {
             val ex = width / 2f + r * 0.78f; val ey = height / 2f - r * 0.7f + bob
