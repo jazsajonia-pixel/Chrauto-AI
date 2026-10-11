@@ -1,6 +1,8 @@
 # Chrauto AI
 
-Chrauto AI is a native Android computer-use agent MVP. It accepts a natural-language task, sends the task and the current Android AccessibilityService tree to a configured Gemini model, validates one structured action locally, executes supported actions on the real device, re-observes the screen, and reports only verified completion.
+Chrauto AI is a native Android agent for carrying out bounded, natural-language computer-use tasks. It reads the current screen through Android accessibility, asks a configured AI provider for a structured next action, validates that action locally, and checks the screen again before reporting a result.
+
+The app is deliberately constrained: it cannot run shell commands or arbitrary code, and it pauses for approval before consequential actions. This repository documents an evolving MVP; the implementation and verification limits below describe the current build.
 
 ## Current implementation
 
