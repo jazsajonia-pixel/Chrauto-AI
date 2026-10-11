@@ -17,7 +17,7 @@ sleep 9
 adb exec-out screencap -p > "$OUT/00-selftest.png"
 adb logcat -d -s ChrautoSelfTest:I | tee "$OUT/selftest.txt"
 grep -q "SELFTEST done" "$OUT/selftest.txt" && ! grep -q "=FAIL" "$OUT/selftest.txt" && echo "SELFTEST OK" || { echo "SELFTEST FAILED"; touch "$OUT/SELFTEST_FAILED"; }
-adb shell input keyevent KEYCODE_HOME; sleep 3
+adb shell input keyevent KEYCODE_BACK; adb shell input keyevent KEYCODE_BACK; adb shell input keyevent KEYCODE_HOME; sleep 3
 adb exec-out screencap -p > "$OUT/02-home-bubble.png"
 SIZE=$(adb shell wm size | grep -o '[0-9]*x[0-9]*' | tail -1); W=${SIZE%x*}; H=${SIZE#*x}
 DENS=$(adb shell wm density | grep -o '[0-9]*' | tail -1)
