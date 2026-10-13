@@ -4,7 +4,7 @@ import com.chrauto.ai.provider.AiProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.coroutineContext
 
 interface DeviceBridge {
@@ -59,7 +59,6 @@ class AgentOrchestrator(
         try {
             if (!device.isReady()) throw IllegalStateException("Accessibility Service is disabled. Enable Chrauto AI in Android Settings → Accessibility first.")
             // Open the network connection while we read the screen.
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { provider.warmUp() } }
             var observation = device.observe() ?: throw IllegalStateException("No accessible active window is available.")
             var actions = 0
             var requests = 0
@@ -97,10 +96,16 @@ class AgentOrchestrator(
                 coroutineContext.ensureActive()
                 log("Observed ${observation.nodes.size} accessible nodes in ${observation.packageName ?: "unknown app"}.")
                 update { it.copy(phase = AgentPhase.THINKING, detail = "Thinking…", target = null) }
-                val plan = provider.plan(task, observation, history).getOrElse { throw it }
+                val providerResult = withTimeoutOrNull(40_000) { provider.plan(task, observation, history) }
+                    ?: throw IllegalStateException("AI request timed out after 40 seconds")
+                val resolvedPlan = providerResult.getOrElse { throw it }
                 requests++
-                plan.thought?.let { log(it) }
+                resolvedPlan.thought?.let { log(it) }
 
+                if ((resolvedPlan.action is AgentAction.TapAt || resolvedPlan.action is AgentAction.GesturePath)) {
+                    throw IllegalStateException("Coordinate actions require an explicitly enabled screen-aware session; this run is node-only.")
+                }
+                val plan = resolvedPlan
                 if (SafetyPolicy.requiresConfirmation(task, plan.action, approved)) {
                     val reason = (plan.action as? AgentAction.AskUser)?.reason ?: "This task may send, buy, delete, or submit something."
                     log("Paused: $reason")
@@ -133,7 +138,8 @@ class AgentOrchestrator(
                 update { it.copy(phase = AgentPhase.ACTING) }
                 log("Step ${actions + 1}: $label")
                 val before = observation.compactText().hashCode()
-                var result = device.execute(resolved)
+                var result = withTimeoutOrNull(15_000) { device.execute(resolved) }
+                    ?: ActionResult(false, "Action timed out after 15 seconds")
                 actions++
                 if (!result.ok) { reject("$label failed: ${result.message}"); device.settle(800); observation = device.observe() ?: observation; continue }
                 consecutiveFailures = 0
@@ -177,6 +183,7 @@ class AgentOrchestrator(
     private fun targetFor(action: AgentAction, observation: UiObservation): TargetBox? {
         val id = when (action) {
             is AgentAction.Tap -> action.nodeId
+            is AgentAction.TapAt, is AgentAction.GesturePath -> null
             is AgentAction.TypeText -> action.nodeId
             is AgentAction.PressEnter -> action.nodeId
             is AgentAction.Scroll -> action.nodeId
@@ -194,6 +201,8 @@ class AgentOrchestrator(
         return when (action) {
             is AgentAction.OpenApp -> "Open ${action.packageName}"
             is AgentAction.Tap -> "Tap \"${name(action.nodeId)}\""
+            is AgentAction.TapAt -> "Tap screen target"
+            is AgentAction.GesturePath -> "Perform screen gesture"
             is AgentAction.TypeText -> "Type \"${action.text.take(40)}\""
             is AgentAction.Scroll -> "Scroll ${action.direction.name.lowercase()}"
             AgentAction.PressBack -> "Go back"
