@@ -42,15 +42,16 @@ object AgentController {
         return startWithSavedSettings(task, approved = true)
     }
 
-    fun start(task: String, config: AiConfig, approved: Boolean = false): Job {
+    fun start(task: String, config: AiConfig, approved: Boolean = false, screenAware: Boolean = false): Job {
         job?.cancel()
         appContext?.let { SettingsStore(it).apply { lastTask = task; addRecent(task) } }
         val apps = appContext?.let(::launchableApps).orEmpty()
         val appText = apps.joinToString("\n") { "${it.first} => ${it.second}" }
         val appMap = apps.toMap()
         val newJob = scope.launch {
-            AgentOrchestrator(ProviderFactory.create(config, appText), AccessibilityBridge, approved = approved, apps = appMap) { _state.value = it }.run(task)
+            AgentOrchestrator(ProviderFactory.create(config, appText), AccessibilityBridge, approved = approved, apps = appMap, screenAware = screenAware) { _state.value = it }.run(task)
         }
+        if (screenAware) newJob.invokeOnCompletion { AccessibilityBridge.stopScreenCapture() }
         job = newJob
         return newJob
     }

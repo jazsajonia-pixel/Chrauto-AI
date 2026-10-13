@@ -37,8 +37,10 @@ class ActionProtocolTest {
         assertNotNull(ActionValidator.validate(AgentAction.GesturePath(listOf(ScreenPoint(10f, 10f), ScreenPoint(250f, 20f)), 500, .95f), screen))
     }
 
-    @Test fun consequentialTaskRequiresConfirmation() {
+    @Test fun consequentialTaskAndVisualTargetRequireConfirmation() {
         assertTrue(SafetyPolicy.requiresConfirmation("send this message", AgentAction.Tap("0.2")))
+        assertTrue(SafetyPolicy.requiresConfirmation("play the game", AgentAction.TapAt(5f, 5f, .9f, "Buy gems")))
+        assertFalse(SafetyPolicy.requiresConfirmation("play the game", AgentAction.TapAt(5f, 5f, .9f, "Jump")))
         assertFalse(SafetyPolicy.requiresConfirmation("search for Kotlin", AgentAction.Tap("0.2")))
     }
 }

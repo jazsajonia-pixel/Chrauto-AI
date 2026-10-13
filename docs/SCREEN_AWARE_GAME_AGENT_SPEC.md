@@ -1,7 +1,7 @@
 # Screen-Aware Game Agent: Implementation Specification
 
 ## Goal
-Enable explicit, bounded, user-authorized game tasks using semantic accessibility data plus fresh screenshot observations, while preserving existing general-purpose app automation. Improve recovery and reduce overlay footprint. This specification is planning only; it is not an implementation or a built APK.
+Enable explicit, bounded, user-authorized game tasks using semantic accessibility data plus fresh screenshot observations, while preserving existing general-purpose app automation. Improve recovery and reduce overlay footprint. Implementation status (feature branch): explicit consent UI, a MediaProjection foreground service, ephemeral downscaled JPEG capture, Gemini inline-image input, and coordinate taps are now implemented. Gesture/recovery and the instrumentation/device verification matrix remain partial; this feature branch has not yet been validated on a physical device. This document remains the acceptance checklist and does not imply a release APK.
 
 ## Platform and permission boundary
 - Keep screenshot automation opt-in per task/session. Request Android `MediaProjection` consent through an Activity result flow; do not silently capture. Show a persistent, clear running indicator and a one-tap stop control. Stop capture on task completion, cancellation, service teardown, or projection revocation.

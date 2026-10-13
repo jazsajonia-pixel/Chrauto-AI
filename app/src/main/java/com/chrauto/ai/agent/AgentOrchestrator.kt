@@ -11,6 +11,8 @@ interface DeviceBridge {
     fun isReady(): Boolean
     suspend fun observe(): UiObservation?
     suspend fun execute(action: AgentAction): ActionResult
+    fun stopScreenCapture() {}
+    fun isScreenCaptureActive(): Boolean = false
     /** Waits until the screen stops changing (up to [maxMs]). */
     suspend fun settle(maxMs: Long) { delay(minOf(maxMs, 600)) }
 }
@@ -29,7 +31,8 @@ data class AgentState(
     val detail: String = "",
     val target: TargetBox? = null,
     val step: Int = 0,
-    val phaseSince: Long = System.currentTimeMillis()
+    val phaseSince: Long = System.currentTimeMillis(),
+    val screenAware: Boolean = false
 )
 
 class AgentOrchestrator(
@@ -43,11 +46,12 @@ class AgentOrchestrator(
     private val approved: Boolean = false,
     /** Launchable apps (label → package) for the instant "open X" shortcut. */
     private val apps: Map<String, String> = emptyMap(),
+    private val screenAware: Boolean = false,
     private val onState: (AgentState) -> Unit
 ) {
     suspend fun run(task: String) {
         val started = System.currentTimeMillis()
-        var state = AgentState(RunStatus.RUNNING, listOf(AgentLog("Started: ${task.take(160)}")), task, AgentPhase.OBSERVING, "Looking at the screen")
+        var state = AgentState(RunStatus.RUNNING, listOf(AgentLog("Started: ${task.take(160)}")), task, AgentPhase.OBSERVING, if (screenAware) "Capturing game screen for Gemini" else "Looking at the screen", screenAware = screenAware)
         onState(state)
         fun update(transform: (AgentState) -> AgentState) {
             val next = transform(state)
@@ -57,9 +61,11 @@ class AgentOrchestrator(
         fun log(message: String, error: Boolean = false) = update { it.copy(logs = (it.logs + AgentLog(message, error)).takeLast(100)) }
 
         try {
+            if (screenAware && !provider.supportsVision) throw IllegalStateException("The selected AI provider cannot accept screenshots. Choose Gemini or turn off screen-aware mode.")
             if (!device.isReady()) throw IllegalStateException("Accessibility Service is disabled. Enable Chrauto AI in Android Settings → Accessibility first.")
             // Open the network connection while we read the screen.
             var observation = device.observe() ?: throw IllegalStateException("No accessible active window is available.")
+            if (screenAware && observation.visionFrame == null) throw IllegalStateException("Screen capture is not active. Grant screen-capture permission and start the task again.")
             var actions = 0
             var requests = 0
             var consecutiveFailures = 0
@@ -94,16 +100,19 @@ class AgentOrchestrator(
 
             while (actions < maxActions && requests < maxRequests && System.currentTimeMillis() - started < maxDurationMs) {
                 coroutineContext.ensureActive()
+                if (screenAware && observation.visionFrame == null) throw IllegalStateException("Fresh screenshot unavailable; stopped before sending another model request.")
                 log("Observed ${observation.nodes.size} accessible nodes in ${observation.packageName ?: "unknown app"}.")
                 update { it.copy(phase = AgentPhase.THINKING, detail = "Thinking…", target = null) }
                 val providerResult = withTimeoutOrNull(40_000) { provider.plan(task, observation, history) }
                     ?: throw IllegalStateException("AI request timed out after 40 seconds")
                 val resolvedPlan = providerResult.getOrElse { throw it }
+                if (screenAware && (!device.isScreenCaptureActive() || observation.visionFrame == null))
+                    throw IllegalStateException("Screen capture stopped while Gemini was thinking; no action was dispatched.")
                 requests++
                 resolvedPlan.thought?.let { log(it) }
 
-                if ((resolvedPlan.action is AgentAction.TapAt || resolvedPlan.action is AgentAction.GesturePath)) {
-                    throw IllegalStateException("Coordinate actions require an explicitly enabled screen-aware session; this run is node-only.")
+                if (!screenAware && (resolvedPlan.action is AgentAction.TapAt || resolvedPlan.action is AgentAction.GesturePath)) {
+                    throw IllegalStateException("Visual coordinate actions require the explicit screen-aware opt-in.")
                 }
                 val plan = resolvedPlan
                 if (SafetyPolicy.requiresConfirmation(task, plan.action, approved)) {
@@ -127,9 +136,9 @@ class AgentOrchestrator(
                     else -> Unit
                 }
 
+                val problem = ActionValidator.validate(plan.action, observation)
+                if (problem != null) { reject("${describe(plan.action, observation)} — $problem"); continue }
                 val resolved = resolve(plan.action, observation)
-                val problem = ActionValidator.validate(resolved, observation)
-                if (problem != null) { reject("${describe(resolved, observation)} — $problem"); continue }
 
                 val label = describe(resolved, observation)
                 val box = targetFor(resolved, observation)
@@ -147,6 +156,7 @@ class AgentOrchestrator(
                 update { it.copy(phase = AgentPhase.OBSERVING, detail = "Checking the result") }
                 device.settle(when (resolved) { is AgentAction.OpenApp -> 3_000; is AgentAction.Wait -> 300; else -> 1_600 })
                 observation = device.observe() ?: throw IllegalStateException("The screen could not be observed after the action.")
+                if (screenAware && observation.visionFrame == null) throw IllegalStateException("A fresh screenshot could not be captured after the action.")
 
                 // A touch that changed nothing may have missed: try once more with an accessibility click.
                 if (resolved is AgentAction.Tap && resolved.viaGesture && observation.compactText().hashCode() == before) {
@@ -169,11 +179,20 @@ class AgentOrchestrator(
         } catch (error: Exception) {
             log(error.message ?: "Unknown failure", true)
             update { it.copy(status = RunStatus.FAILED, phase = AgentPhase.DONE, detail = error.message ?: "Failed", target = null) }
+        } finally {
+            if (screenAware) device.stopScreenCapture()
         }
     }
 
     /** Fill in a scroll container when omitted. Taps keep the exact node the AI chose (its centre is touched). */
     private fun resolve(action: AgentAction, observation: UiObservation): AgentAction = when (action) {
+        is AgentAction.TapAt -> observation.visionFrame?.let { frame -> action.copy(
+            x = action.x * observation.screenWidth / frame.width,
+            y = action.y * observation.screenHeight / frame.height
+        ) } ?: action
+        is AgentAction.GesturePath -> observation.visionFrame?.let { frame -> action.copy(points = action.points.map { point ->
+            ScreenPoint(point.x * observation.screenWidth / frame.width, point.y * observation.screenHeight / frame.height)
+        }) } ?: action
         is AgentAction.Scroll -> if (action.nodeId == null || observation.node(action.nodeId)?.scrollable != true)
             observation.nodes.firstOrNull { it.scrollable && it.enabled }?.let { AgentAction.Scroll(it.id, action.direction) } ?: action
         else action

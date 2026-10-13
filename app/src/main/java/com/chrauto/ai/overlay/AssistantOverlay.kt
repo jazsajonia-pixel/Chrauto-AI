@@ -349,6 +349,7 @@ class AssistantOverlay(private val context: Context) {
 
     // ---------- Cursor buddy ----------
     private fun updateCursor(state: AgentState, previous: AgentState) {
+        if (state.screenAware) { hideCursor(immediate = true); lastTargetKey = null; return }
         val running = state.status == RunStatus.RUNNING
         if (!running) {
             lastTargetKey = null

@@ -36,13 +36,18 @@ object AccessibilityBridge : com.chrauto.ai.agent.DeviceBridge {
     override suspend fun observe(): UiObservation? {
         repeat(8) {
             val obs = service?.snapshot()
-            if (obs != null && obs.nodes.isNotEmpty()) return obs
+            if (obs != null && (obs.nodes.isNotEmpty() || ScreenCaptureBridge.active)) {
+                if (ScreenCaptureBridge.active) return obs.copy(visionFrame = ScreenCaptureBridge.captureFrame())
+                return obs
+            }
             kotlinx.coroutines.delay(250)
         }
         return service?.snapshot()
     }
     override suspend fun execute(action: AgentAction) = service?.executeAction(action) ?: ActionResult(false, "Accessibility Service unavailable")
     override suspend fun settle(maxMs: Long) { service?.settle(maxMs) ?: kotlinx.coroutines.delay(minOf(maxMs, 600)) }
+    override fun stopScreenCapture() { ScreenCaptureBridge.stop() }
+    override fun isScreenCaptureActive() = ScreenCaptureBridge.active
 }
 
 private const val MAX_NODES = 800
@@ -67,6 +72,8 @@ class AccessibilityAgentService : AccessibilityService() {
         s.launch { com.chrauto.ai.voice.ChronEngine.level.collect { overlay?.renderLevel(it) } }
         if (SettingsStore(this).chronEnabled && !com.chrauto.ai.voice.ChronService.running) com.chrauto.ai.voice.ChronService.start(this)
     }
+
+    fun stopScreenCapture() { ScreenCaptureBridge.stop(this) }
 
     fun setAssistantVisible(visible: Boolean) {
         if (visible) {
@@ -167,8 +174,17 @@ class AccessibilityAgentService : AccessibilityService() {
                     if (enter.ok) ActionResult(true, "Typed and submitted") else ActionResult(true, "Typed (Enter not available: ${enter.message})")
                 }
             }
-            is AgentAction.TapAt -> gestureTap(action.x, action.y).let { ActionResult(it, if (it) "Tapped on screen" else "Tap gesture was cancelled") }
-            is AgentAction.GesturePath -> dispatchPath(action).let { ActionResult(it, if (it) "Gesture completed" else "Gesture was cancelled or unsupported") }
+            is AgentAction.TapAt -> {
+                val dispatch: suspend () -> Boolean = { gestureTap(action.x, action.y) }
+                val ok = overlay?.withTouchPassThrough(action.x, action.y, dispatch) ?: dispatch()
+                ActionResult(ok, if (ok) "Tapped on screen" else "Tap gesture was cancelled")
+            }
+            is AgentAction.GesturePath -> {
+                val dispatch: suspend () -> Boolean = { dispatchPath(action) }
+                val covered = action.points.firstOrNull { p -> overlay?.covers(p.x, p.y) == true }
+                val ok = if (covered != null) overlay?.withTouchPassThrough(covered.x, covered.y, dispatch) ?: dispatch() else dispatch()
+                ActionResult(ok, if (ok) "Gesture completed" else "Gesture was cancelled or unsupported")
+            }
             is AgentAction.Scroll, AgentAction.PressBack, is AgentAction.PressEnter -> executor.execute(action)
             is AgentAction.Wait -> { delay(action.milliseconds); ActionResult(true, "Wait completed") }
             is AgentAction.AskUser -> ActionResult(false, "User confirmation required")
