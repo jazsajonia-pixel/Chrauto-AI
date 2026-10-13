@@ -67,6 +67,16 @@ class MainActivity : ComponentActivity() {
     private var micOn by mutableStateOf(false)
     private var chronOn by mutableStateOf(false)
     private var startChronAfterMic = false
+    private var pendingScreenTask: Pair<String, AiConfig>? = null
+    private val screenConsent = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val pending = pendingScreenTask.also { pendingScreenTask = null }
+        val data = result.data
+        if (result.resultCode == RESULT_OK && data != null && pending != null) {
+            runCatching { com.chrauto.ai.accessibility.ScreenCaptureBridge.start(this, result.resultCode, data) }
+                .onSuccess { AgentController.start(pending.first, pending.second, screenAware = true) }
+                .onFailure { android.widget.Toast.makeText(this, "Could not start screen capture: ${it.message}", android.widget.Toast.LENGTH_LONG).show() }
+        } else android.widget.Toast.makeText(this, "Screen-aware mode was not started. No screenshots were captured.", android.widget.Toast.LENGTH_SHORT).show()
+    }
     private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         micOn = granted
         if (granted && (startChronAfterMic || settings.chronEnabled)) { startChronAfterMic = false; startChron() }
@@ -83,6 +93,16 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun startChron() { if (!ChronService.running) ChronService.start(this) }
+
+    private fun requestScreenAware(task: String, config: AiConfig) {
+        if (config.provider != ProviderKind.GEMINI) {
+            android.widget.Toast.makeText(this, "Screen-aware mode currently requires Gemini.", android.widget.Toast.LENGTH_LONG).show()
+            return
+        }
+        pendingScreenTask = task to config
+        val manager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+        screenConsent.launch(manager.createScreenCaptureIntent())
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
@@ -117,7 +137,8 @@ class MainActivity : ComponentActivity() {
                     onTalkNow = { if (!micOn) micPermission.launch(Manifest.permission.RECORD_AUDIO) else ChronEngine.listenNow(this) },
                     loadRecents = { settings.recents },
                     loadFavorites = { settings.favorites },
-                    onToggleFavorite = { settings.toggleFavorite(it) }
+                    onToggleFavorite = { settings.toggleFavorite(it) },
+                    onStartScreenAware = ::requestScreenAware
                 )
             }
         }
@@ -180,10 +201,12 @@ fun ChrautoScreen(
     onTalkNow: () -> Unit = {},
     loadRecents: () -> List<String> = { emptyList() },
     loadFavorites: () -> List<String> = { emptyList() },
-    onToggleFavorite: (String) -> Boolean = { false }
+    onToggleFavorite: (String) -> Boolean = { false },
+    onStartScreenAware: (String, AiConfig) -> Unit = { _, _ -> }
 ) {
     val scope = rememberCoroutineScope()
     var task by remember { mutableStateOf(initialTask) }
+    var screenAware by rememberSaveable { mutableStateOf(false) }
     var config by remember { mutableStateOf(initialConfig) }
     fun updateConfig(c: AiConfig) { config = c; onConfigChanged(c) }
     var state by remember { mutableStateOf(AgentState()) }
@@ -213,7 +236,7 @@ fun ChrautoScreen(
 
             SetupCard(
                 config = config, onConfig = ::updateConfig,
-                onProvider = { p -> val c = loadConfig(p); config = c; onConfigChanged(c) },
+                onProvider = { p -> val c = loadConfig(p); config = c; screenAware = false; onConfigChanged(c) },
                 accessibilityEnabled = accessibilityEnabled, onOpenAccessibility = onOpenAccessibility,
                 micGranted = micGranted, onRequestMic = onRequestMic,
                 floatingAssistant = floatingAssistant, onFloatingAssistantChanged = onFloatingAssistantChanged,
@@ -236,6 +259,13 @@ fun ChrautoScreen(
                             shape = RoundedCornerShape(50))
                     }
                 }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = screenAware, onCheckedChange = { screenAware = it }, enabled = config.provider == ProviderKind.GEMINI, modifier = Modifier.testTag("screenAwareSwitch"))
+                    Column(Modifier.weight(1f)) {
+                        Text("Screen-aware game mode", style = MaterialTheme.typography.labelLarge)
+                        Text(if (config.provider == ProviderKind.GEMINI) "Screen content may be private. Screenshots are sent to Gemini and not saved." else "Currently requires Gemini.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                     Button(
                         enabled = !running && task.isNotBlank() && config.isUsable,
@@ -243,7 +273,9 @@ fun ChrautoScreen(
                         shape = RoundedCornerShape(16.dp),
                         onClick = {
                             val c = config
-                            runJob = scope.launch {
+                            if (screenAware) {
+                                onStartScreenAware(task, c)
+                            } else runJob = scope.launch {
                                 val custom = runTask
                                 if (custom != null) custom(task, c.apiKey, c.model) { state = it }
                                 else AgentController.runAndAwait(task, c, { state = it })

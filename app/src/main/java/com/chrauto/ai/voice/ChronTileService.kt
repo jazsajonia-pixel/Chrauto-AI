@@ -1,6 +1,8 @@
 package com.chrauto.ai.voice
 
 import android.content.Intent
+import android.annotation.SuppressLint
+import android.annotation.TargetApi
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.chrauto.ai.MainActivity
@@ -18,15 +20,23 @@ class ChronTileService : TileService() {
             if (!ChronService.start(this)) {
                 // Needs the mic permission or a foreground start: open the app, which finishes the job.
                 val intent = Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra(MainActivity.EXTRA_REQUEST_MIC, true)
-                if (android.os.Build.VERSION.SDK_INT >= 34) {
-                    startActivityAndCollapse(android.app.PendingIntent.getActivity(this, 0, intent, android.app.PendingIntent.FLAG_IMMUTABLE))
-                } else {
-                    @Suppress("DEPRECATION") startActivityAndCollapse(intent)
-                }
+                if (android.os.Build.VERSION.SDK_INT >= 34) collapseWithPendingIntent(intent)
+                else collapseWithIntent(intent)
             }
         } else ChronService.stop(this)
         refresh()
     }
+
+    @TargetApi(34)
+    private fun collapseWithPendingIntent(intent: Intent) {
+        startActivityAndCollapse(android.app.PendingIntent.getActivity(
+            this, 0, intent, android.app.PendingIntent.FLAG_UPDATE_CURRENT or android.app.PendingIntent.FLAG_IMMUTABLE
+        ))
+    }
+
+    @SuppressLint("StartActivityAndCollapseDeprecated")
+    @Suppress("DEPRECATION")
+    private fun collapseWithIntent(intent: Intent) { startActivityAndCollapse(intent) }
 
     private fun refresh() {
         val tile = qsTile ?: return

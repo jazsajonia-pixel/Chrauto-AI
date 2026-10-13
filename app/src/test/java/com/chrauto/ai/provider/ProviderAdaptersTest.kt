@@ -2,6 +2,7 @@ package com.chrauto.ai.provider
 
 import com.chrauto.ai.agent.AgentAction
 import com.chrauto.ai.agent.UiObservation
+import com.chrauto.ai.agent.VisionFrame
 import com.sun.net.httpserver.HttpServer
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
@@ -32,6 +33,26 @@ class ProviderAdaptersTest {
         server.start()
     }
     @After fun stop() = server.stop(0)
+
+    @Test fun geminiPlanPayloadIncludesJpegInlineDataOnlyWhenFrameExists() {
+        val provider = GeminiProvider("key")
+        val jpeg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0x01, 0x02)
+        val withFrame = provider.buildPlanRequest("play game", obs.copy(visionFrame = VisionFrame(jpeg, 320, 180)))
+        val parts = withFrame.getJSONArray("contents").getJSONObject(0).getJSONArray("parts")
+        assertEquals(2, parts.length())
+        val image = parts.getJSONObject(1).getJSONObject("inlineData")
+        assertEquals("image/jpeg", image.getString("mimeType"))
+        assertEquals(java.util.Base64.getEncoder().encodeToString(jpeg), image.getString("data"))
+        assertEquals("application/json", withFrame.getJSONObject("generationConfig").getString("responseMimeType"))
+        assertTrue(withFrame.getJSONObject("generationConfig").has("responseSchema"))
+        val nodeOnly = provider.buildPlanRequest("play game", obs).getJSONArray("contents").getJSONObject(0).getJSONArray("parts")
+        assertEquals(1, nodeOnly.length())
+    }
+
+    @Test fun geminiVisionActionParsesCoordinatesAndConfidence() {
+        val plan = ActionPlanParser.parse("""{"action":"tap_at","x":145.5,"y":80,"confidence":0.93,"target_label":"Jump"}""")
+        assertEquals(AgentAction.TapAt(145.5f, 80f, .93f, "Jump"), plan.action)
+    }
 
     @Test fun openAiChatSendsJsonModeAndParsesReply() = runBlocking {
         responder = { _, _ -> 200 to """{"choices":[{"message":{"content":"{\"action\":\"tap\",\"node_id\":\"0.1\"}"}}]}""" }

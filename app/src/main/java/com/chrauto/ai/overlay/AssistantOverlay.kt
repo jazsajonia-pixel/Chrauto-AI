@@ -87,13 +87,13 @@ class AssistantOverlay(private val context: Context) {
             cornerRadius = dp(24).toFloat(); setColor(0xF7FFFFFF.toInt()); setStroke(dp(1.5f), 0x337C5CFF)
         }
         elevation = dp(8).toFloat()
-        setPadding(dp(12), dp(10), dp(12), dp(10))
+        setPadding(dp(8), dp(8), dp(8), dp(8))
         visibility = View.GONE
-        addView(statusText, LinearLayout.LayoutParams(dp(236), LinearLayout.LayoutParams.WRAP_CONTENT))
+        addView(statusText, LinearLayout.LayoutParams(dp(208), LinearLayout.LayoutParams.WRAP_CONTENT))
         addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             buttons.forEachIndexed { i, b ->
-                addView(b, LinearLayout.LayoutParams(dp(40), dp(40)).apply { if (i > 0) marginStart = dp(9) })
+                addView(b, LinearLayout.LayoutParams(dp(48), dp(48)).apply { if (i > 0) marginStart = dp(4) })
             }
         })
     }
@@ -103,7 +103,7 @@ class AssistantOverlay(private val context: Context) {
         clipChildren = false; clipToPadding = false
         setPadding(dp(6), dp(6), dp(6), dp(6))
         addView(panel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
-        addView(bubble, LinearLayout.LayoutParams(dp(62), dp(62)))
+        addView(bubble, LinearLayout.LayoutParams(dp(48), dp(48)))
     }
     private val dockParams = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -349,6 +349,7 @@ class AssistantOverlay(private val context: Context) {
 
     // ---------- Cursor buddy ----------
     private fun updateCursor(state: AgentState, previous: AgentState) {
+        if (state.screenAware) { hideCursor(immediate = true); lastTargetKey = null; return }
         val running = state.status == RunStatus.RUNNING
         if (!running) {
             lastTargetKey = null

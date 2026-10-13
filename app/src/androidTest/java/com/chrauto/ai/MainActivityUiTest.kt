@@ -33,6 +33,18 @@ class MainActivityUiTest {
         compose.onNodeWithTag("runButton").assertIsEnabled()
     }
 
+    @Test fun screenAwareModeRequiresExplicitOptInAndRoutesThroughConsentCallback() {
+        val requested = AtomicBoolean(false)
+        compose.setContent {
+            ChrautoScreen(onOpenAccessibility = {}, observeController = false,
+                onStartScreenAware = { _, _ -> requested.set(true) })
+        }
+        compose.onNodeWithTag("apiKeyInput").performScrollTo().performTextInput("test-key")
+        compose.onNodeWithTag("screenAwareSwitch").performScrollTo().performClick()
+        compose.onNodeWithTag("runButton").performScrollTo().performClick()
+        assertTrue(requested.get())
+    }
+
     @Test fun runReportsRunningAndCompletionThroughInjectedRuntime() {
         compose.setContent {
             ChrautoScreen(

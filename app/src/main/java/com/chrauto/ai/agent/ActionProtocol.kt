@@ -4,11 +4,19 @@ import android.graphics.Rect
 
 const val MAX_TEXT_LENGTH = 2_000
 const val MAX_ACTIONS_PER_RESPONSE = 1
+const val MAX_GESTURE_POINTS = 64
+const val MAX_GESTURE_DURATION_MS = 10_000L
+const val MAX_GESTURE_PATH_PIXELS = 8_000.0
+const val MAX_OBSERVATION_AGE_MS = 10_000L
 
 sealed interface AgentAction {
     data class OpenApp(val packageName: String) : AgentAction
     /** [viaGesture] = real touch at the node's centre (most reliable); false = accessibility click. */
     data class Tap(val nodeId: String, val viaGesture: Boolean = true) : AgentAction
+    /** Coordinate action is only enabled by an explicit screen-aware run. */
+    data class TapAt(val x: Float, val y: Float, val confidence: Float, val targetLabel: String = "") : AgentAction
+    /** Public AccessibilityService supports a sequence of strokes, not general independent multi-touch. */
+    data class GesturePath(val points: List<ScreenPoint>, val durationMs: Long, val confidence: Float) : AgentAction
     /** Submits the focused/given text field (keyboard Enter / Search). */
     data class PressEnter(val nodeId: String? = null) : AgentAction
     data class TypeText(val nodeId: String, val text: String, val replace: Boolean = true, val submit: Boolean = false) : AgentAction
@@ -22,6 +30,9 @@ sealed interface AgentAction {
 
 enum class Direction { UP, DOWN, LEFT, RIGHT }
 
+data class ScreenPoint(val x: Float, val y: Float)
+/** Ephemeral JPEG bytes attached only to screen-aware observations; excluded from compactText/logs. */
+data class VisionFrame(val jpeg: ByteArray, val width: Int, val height: Int, val capturedAtMillis: Long = System.currentTimeMillis())
 data class ActionPlan(val action: AgentAction, val thought: String? = null)
 data class ActionResult(val ok: Boolean, val message: String, val changed: Boolean = false)
 data class UiNodeSnapshot(
@@ -43,7 +54,10 @@ data class UiObservation(
     val packageName: String?,
     val activityName: String?,
     val nodes: List<UiNodeSnapshot>,
-    val capturedAtMillis: Long = System.currentTimeMillis()
+    val capturedAtMillis: Long = System.currentTimeMillis(),
+    val screenWidth: Int = 0,
+    val screenHeight: Int = 0,
+    val visionFrame: VisionFrame? = null
 ) {
     fun compactText(): String = buildString {
         append("package=").append(packageName ?: "unknown").append('\n')
@@ -93,6 +107,8 @@ object ActionValidator {
             observation?.clickableTarget(action.nodeId) == null -> "Target is not enabled and clickable"
             else -> null
         }
+        is AgentAction.TapAt -> validatePoint(action.x, action.y, action.confidence, observation)
+        is AgentAction.GesturePath -> validateGesture(action, observation)
         is AgentAction.TypeText -> when {
             action.text.length > MAX_TEXT_LENGTH -> "Text exceeds $MAX_TEXT_LENGTH characters"
             action.text.contains('\u0000') -> "Text contains an invalid character"
@@ -110,13 +126,35 @@ object ActionValidator {
     }
 
     private fun node(observation: UiObservation?, id: String): UiNodeSnapshot? = observation?.nodes?.firstOrNull { it.id == id }
+
+    private fun validatePoint(x: Float, y: Float, confidence: Float, observation: UiObservation?): String? {
+        if (!x.isFinite() || !y.isFinite() || !confidence.isFinite() || confidence !in 0.8f..1f) return "Visual target confidence must be at least 0.80"
+        if (observation == null || observation.screenWidth <= 0 || observation.screenHeight <= 0) return "Screen dimensions are unavailable"
+        if (System.currentTimeMillis() - observation.capturedAtMillis !in 0..MAX_OBSERVATION_AGE_MS) return "Screen observation is stale; observe again before acting"
+        if (observation.visionFrame?.let { System.currentTimeMillis() - it.capturedAtMillis !in 0..MAX_OBSERVATION_AGE_MS } == true) return "Screenshot is stale; observe again before acting"
+        val bounds = observation.visionFrame?.let { it.width to it.height } ?: (observation.screenWidth to observation.screenHeight)
+        if (x < 0 || y < 0 || x >= bounds.first || y >= bounds.second) return "Coordinate is outside the current screen/image"
+        return null
+    }
+
+    private fun validateGesture(action: AgentAction.GesturePath, observation: UiObservation?): String? {
+        if (action.points.size !in 2..MAX_GESTURE_POINTS) return "Gesture path must contain 2 to $MAX_GESTURE_POINTS points"
+        if (action.durationMs !in 50..MAX_GESTURE_DURATION_MS) return "Gesture duration must be between 50 and $MAX_GESTURE_DURATION_MS ms"
+        for (point in action.points) validatePoint(point.x, point.y, action.confidence, observation)?.let { return it }
+        var length = 0.0
+        action.points.zipWithNext().forEach { (a, b) -> length += kotlin.math.hypot((b.x-a.x).toDouble(), (b.y-a.y).toDouble()) }
+        if (!length.isFinite() || length > MAX_GESTURE_PATH_PIXELS) return "Gesture path exceeds the safe maximum length"
+        return null
+    }
 }
 
 object SafetyPolicy {
-    private val consequentialWords = setOf("send", "publish", "purchase", "buy", "delete", "security", "password", "submit")
+    private val consequentialWords = setOf("send", "publish", "purchase", "buy", "pay", "payment", "checkout", "transfer", "subscribe", "share", "install", "delete", "security", "password", "submit")
     fun requiresConfirmation(task: String, action: AgentAction, approved: Boolean = false): Boolean {
         if (action is AgentAction.AskUser) return true
         if (approved) return false
-        return task.lowercase().split(Regex("\\W+")).any(consequentialWords::contains)
+        val visualLabel = (action as? AgentAction.TapAt)?.targetLabel.orEmpty()
+        val terms = (task + " " + visualLabel).lowercase().split(Regex("\\W+"))
+        return terms.any(consequentialWords::contains)
     }
 }

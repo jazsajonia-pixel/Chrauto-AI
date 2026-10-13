@@ -10,6 +10,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 interface AiProvider {
+    val supportsVision: Boolean get() = false
     suspend fun plan(task: String, observation: UiObservation, history: List<String> = emptyList()): Result<ActionPlan>
     /** Free-form completion used by the Chron voice assistant (expects a JSON reply). */
     suspend fun chat(system: String, user: String): Result<String> = Result.failure(UnsupportedOperationException("chat not supported"))
@@ -33,6 +34,7 @@ class GeminiProvider(
     private val installedApps: String = "",
     private val timeoutMs: Int = 35_000
 ) : AiProvider {
+    override val supportsVision: Boolean get() = true
     /** Lower thinking = much faster steps. Dropped automatically if a model rejects it. */
     @Volatile private var thinking: JSONObject? = thinkingFor(model)
 
@@ -82,9 +84,23 @@ class GeminiProvider(
 
     private suspend fun call(task: String, observation: UiObservation, history: List<String>): String {
         val modelId = model.trim().removePrefix("models/").ifBlank { DEFAULT_MODEL }
-        val request = JSONObject().apply {
+        val request = buildPlanRequest(task, observation, history)
+        val body = Http.request("Gemini", "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent",
+            mapOf("x-goog-api-key" to apiKey), request, timeoutMs)
+        return extractText(body)
+    }
+
+    internal fun buildPlanRequest(task: String, observation: UiObservation, history: List<String> = emptyList()): JSONObject {
+        val parts = JSONArray().put(JSONObject().put("text", PromptBuilder.user(task, observation, history, installedApps)))
+        observation.visionFrame?.let { frame ->
+            require(frame.jpeg.isNotEmpty()) { "Screen-aware mode produced an empty screenshot" }
+            parts.put(JSONObject().put("inlineData", JSONObject()
+                .put("mimeType", "image/jpeg")
+                .put("data", java.util.Base64.getEncoder().encodeToString(frame.jpeg))))
+        }
+        return JSONObject().apply {
             put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", PromptBuilder.system))))
-            put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", JSONArray().put(JSONObject().put("text", PromptBuilder.user(task, observation, history, installedApps))))))
+            put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
             put("generationConfig", JSONObject().apply {
                 put("responseMimeType", "application/json")
                 put("responseSchema", schema())
@@ -92,9 +108,6 @@ class GeminiProvider(
                 thinking?.let { put("thinkingConfig", it) }
             })
         }
-        val body = Http.request("Gemini", "https://generativelanguage.googleapis.com/v1beta/models/$modelId:generateContent",
-            mapOf("x-goog-api-key" to apiKey), request, timeoutMs)
-        return extractText(body)
     }
 
     private fun thinkingFor(model: String): JSONObject? {
@@ -135,6 +148,10 @@ class GeminiProvider(
             put("properties", JSONObject().apply {
                 put("action", JSONObject().put("type", "string").put("enum", JSONArray(ActionPlanParser.ACTIONS)))
                 put("node_id", str("Target node id for tap, type_text, press_enter, or scroll"))
+                put("x", JSONObject().put("type", "number").put("nullable", true).put("description", "Image-pixel x for tap_at"))
+                put("y", JSONObject().put("type", "number").put("nullable", true).put("description", "Image-pixel y for tap_at"))
+                put("confidence", JSONObject().put("type", "number").put("nullable", true).put("description", "Visual target confidence from 0.80 to 1.0"))
+                put("target_label", str("Short label visible on the visual target"))
                 put("package_name", str("Android package for open_app"))
                 put("text", str("Text for type_text"))
                 put("direction", str("Scroll direction", listOf("UP", "DOWN", "LEFT", "RIGHT")))
@@ -147,13 +164,13 @@ class GeminiProvider(
                 put("thought", str("One short sentence describing what you are doing, shown to the user"))
             })
             put("required", JSONArray(listOf("action")))
-            put("propertyOrdering", JSONArray(listOf("thought", "action", "node_id", "package_name", "text", "submit", "direction", "milliseconds", "summary", "evidence", "reason", "message")))
+            put("propertyOrdering", JSONArray(listOf("thought", "action", "node_id", "x", "y", "confidence", "target_label", "package_name", "text", "submit", "direction", "milliseconds", "summary", "evidence", "reason", "message")))
         }
     }
 }
 
 object ActionPlanParser {
-    val ACTIONS = listOf("open_app", "tap", "type_text", "press_enter", "scroll", "press_back", "wait", "ask_user", "finish", "report_error")
+    val ACTIONS = listOf("open_app", "tap", "tap_at", "type_text", "press_enter", "scroll", "press_back", "wait", "ask_user", "finish", "report_error")
     private val thinkTags = Regex("<think>[\\s\\S]*?</think>", RegexOption.IGNORE_CASE)
 
     /** Pulls the JSON object out of replies that may include markdown fences or <think> blocks. */
@@ -175,6 +192,7 @@ object ActionPlanParser {
         val action = when (val type = value("action")) {
             "open_app" -> AgentAction.OpenApp(value("package_name"))
             "tap", "click" -> AgentAction.Tap(value("node_id"))
+            "tap_at" -> AgentAction.TapAt(value("x").toFloat(), value("y").toFloat(), value("confidence").toFloat(), opt("target_label").orEmpty())
             "type_text" -> AgentAction.TypeText(value("node_id"), opt("text") ?: "", submit = opt("submit")?.toBooleanStrictOrNull() == true)
             "scroll" -> AgentAction.Scroll(opt("node_id"), Direction.valueOf(value("direction").uppercase()))
             "press_enter", "submit", "enter" -> AgentAction.PressEnter(opt("node_id"))
