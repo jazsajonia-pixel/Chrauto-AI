@@ -1,11 +1,13 @@
+<!-- Chrauto agent mark: rounded-square head, status node, single visor light. Fits the 66dp safe zone. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF" android:pathData="M54,28c15.5,0 26,11 26,25.5c0,15.5 -11.5,26.5 -26,26.5s-26,-11 -26,-26.5C28,39 38.5,28 54,28z"/>
-    <path android:fillColor="#2B2160" android:pathData="M44,46c2.8,0 4.5,2.4 4.5,5.6s-1.7,5.6 -4.5,5.6s-4.5,-2.4 -4.5,-5.6S41.2,46 44,46z"/>
-    <path android:fillColor="#2B2160" android:pathData="M64,46c2.8,0 4.5,2.4 4.5,5.6s-1.7,5.6 -4.5,5.6s-4.5,-2.4 -4.5,-5.6S61.2,46 64,46z"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M45.4,47.6m-1.4,0a1.4,1.4 0,1 1,2.8 0a1.4,1.4 0,1 1,-2.8 0"/>
-    <path android:fillColor="#FFFFFF" android:pathData="M65.4,47.6m-1.4,0a1.4,1.4 0,1 1,2.8 0a1.4,1.4 0,1 1,-2.8 0"/>
-    <path android:fillColor="#FF8FB8" android:pathData="M38,61m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0"/>
-    <path android:fillColor="#FF8FB8" android:pathData="M70,61m-3.5,0a3.5,3.5 0,1 1,7 0a3.5,3.5 0,1 1,-7 0"/>
-    <path android:strokeColor="#2B2160" android:strokeWidth="2.6" android:strokeLineCap="round" android:pathData="M49,62.5q5,4.5 10,0"/>
-    <path android:fillColor="#FFD166" android:pathData="M54,17l2.2,5.3 5.3,2.2 -5.3,2.2 -2.2,5.3 -2.2,-5.3 -5.3,-2.2 5.3,-2.2z"/>
+    <!-- status node -->
+    <path android:fillColor="#4F7CFF" android:pathData="M54,31m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0"/>
+    <path android:fillColor="#4F7CFF" android:pathData="M53.2,33.5h1.6v5h-1.6z"/>
+    <!-- head -->
+    <path android:fillColor="#25304A" android:strokeColor="#4F7CFF" android:strokeWidth="1.6"
+        android:pathData="M45,38.5h18a12,12 0,0 1,12 12v13a12,12 0,0 1,-12 12h-18a12,12 0,0 1,-12 -12v-13a12,12 0,0 1,12 -12z"/>
+    <!-- visor -->
+    <path android:fillColor="#070B14" android:pathData="M42,51h24a4.5,4.5 0,0 1,0 9h-24a4.5,4.5 0,0 1,0 -9z"/>
+    <!-- visor light -->
+    <path android:fillColor="#7FA2FF" android:pathData="M45,53.6h18a1.9,1.9 0,0 1,0 3.8h-18a1.9,1.9 0,0 1,0 -3.8z"/>
 </vector>

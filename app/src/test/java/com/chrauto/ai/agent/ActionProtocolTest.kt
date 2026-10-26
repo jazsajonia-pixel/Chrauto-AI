@@ -24,4 +24,12 @@ class ActionProtocolTest {
         assertTrue(SafetyPolicy.requiresConfirmation("send this message", AgentAction.Tap("0.2")))
         assertFalse(SafetyPolicy.requiresConfirmation("search for Kotlin", AgentAction.Tap("0.2")))
     }
+
+    @Test fun irreversibleTargetsAreRecognised() {
+        assertTrue(SafetyPolicy.isIrreversibleLabel("Tap \"Send\""))
+        assertTrue(SafetyPolicy.isIrreversibleLabel("Tap \"Place order\""))
+        assertTrue(SafetyPolicy.isIrreversibleLabel("Tap \"Delete\""))
+        assertFalse(SafetyPolicy.isIrreversibleLabel("Tap \"Search\""))
+        assertFalse(SafetyPolicy.isIrreversibleLabel("Tap \"Settings\""))
+    }
 }

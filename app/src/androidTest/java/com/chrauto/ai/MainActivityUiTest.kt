@@ -46,8 +46,8 @@ class MainActivityUiTest {
         }
         compose.onNodeWithTag("apiKeyInput").performScrollTo().performTextInput("test-key")
         compose.onNodeWithTag("runButton").performScrollTo().performClick()
-        compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: SUCCEEDED").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Status: SUCCEEDED").performScrollTo().assertIsDisplayed()
+        compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: Completed").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Status: Completed").performScrollTo().assertIsDisplayed()
     }
 
     @Test fun stopCancelsAnActiveRunAndReportsCancellation() {
@@ -67,8 +67,8 @@ class MainActivityUiTest {
         compose.onNodeWithTag("runButton").performScrollTo().performClick()
         compose.waitUntil(2_000) { started.get() }
         compose.onNodeWithTag("stopButton").performScrollTo().assertIsEnabled().performClick()
-        compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: CANCELLED").fetchSemanticsNodes().isNotEmpty() }
-        compose.onNodeWithText("Status: CANCELLED").performScrollTo().assertIsDisplayed()
+        compose.waitUntil(2_000) { compose.onAllNodesWithText("Status: Cancelled").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithText("Status: Cancelled").performScrollTo().assertIsDisplayed()
     }
 
     @Test fun accessibilitySetupCallbackIsInvoked() {

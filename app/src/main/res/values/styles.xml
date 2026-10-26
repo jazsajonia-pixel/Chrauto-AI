@@ -1,7 +1,7 @@
 <resources>
     <style name="Theme.Chrauto" parent="android:style/Theme.Material.Light.NoActionBar">
-        <item name="android:colorAccent">#7C5CFF</item>
-        <item name="android:windowBackground">#FBF8FF</item>
+        <item name="android:colorAccent">#3563E9</item>
+        <item name="android:windowBackground">#F5F7FB</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
     </style>

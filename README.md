@@ -12,6 +12,14 @@ The test suite includes JVM protocol/parser tests, Compose UI instrumentation te
 
 The provider default is `gemini-3.8-flash`, selected because the current official Gemini documentation lists it as a stable multimodal model with structured-output support. Gemini limits are project/model dependent and the free tier is not guaranteed; check AI Studio before testing. The API key is entered on the device and never committed or printed in logs.
 
+## What's new in 0.6.0 — Scheduled tasks and Viber
+
+- **Scheduled tasks:** create, edit, schedule, run now, cancel, retry, and delete automations. They are saved on the phone with status, attempts, results, errors, and history, and they survive app restarts, reboots, and time-zone changes.
+- **Honest background behaviour:** if the phone is locked or the screen is off when a task is due, it waits ("Waiting for device") and starts after unlock. It never reports success for something it didn't do.
+- **Viber group messages (assisted):** schedule text and images for an existing group. Chrauto selects the group only on an exact, unique name match, checks the chat before and after, and never re-sends a message that might already have been sent. Not an official Viber bot; not yet tested on a real phone. See [docs/SCHEDULING_AND_VIBER.md](docs/SCHEDULING_AND_VIBER.md).
+- **New design:** a compact geometric agent mark replaces the cartoon mascot; light and dark themes follow the phone setting.
+- **Reliability:** screen reading is off the UI thread, Stop cancels in-flight AI requests immediately, and Send/Pay/Delete-like buttons are never tapped twice automatically.
+
 ## What's new in 0.5.0 — Chron Live
 
 - **Talk over Chron (barge-in):** the mic stays open while Chron speaks. Start talking and it stops mid-sentence to listen. An echo filter ignores Chron's own voice from the speaker; with earphones a single word is enough. Toggle: **Interrupt anytime**.

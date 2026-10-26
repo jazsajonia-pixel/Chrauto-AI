@@ -21,7 +21,8 @@ adb shell input keyevent KEYCODE_BACK; adb shell input keyevent KEYCODE_BACK; ad
 adb exec-out screencap -p > "$OUT/02-home-bubble.png"
 SIZE=$(adb shell wm size | grep -o '[0-9]*x[0-9]*' | tail -1); W=${SIZE%x*}; H=${SIZE#*x}
 DENS=$(adb shell wm density | grep -o '[0-9]*' | tail -1)
-X=$(( W - 47 * DENS / 160 )); Y=$(( H - 76 * DENS / 160 ))
+# Bubble centre: dock margin 10dp + padding 6dp + half of the 48dp bubble; 28dp + 6dp + 24dp from the bottom.
+X=$(( W - 40 * DENS / 160 )); Y=$(( H - 58 * DENS / 160 ))
 adb shell input tap $X $Y; sleep 2
 adb exec-out screencap -p > "$OUT/03-panel-expanded.png"
 adb shell am broadcast -n $PKG/.debug.DemoReceiver; sleep 1.2
@@ -47,5 +48,18 @@ adb exec-out screencap -p > "$OUT/09c-chron-duplex.png"
 adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 2; adb shell input swipe 540 1500 540 600 300; sleep 1
 adb exec-out screencap -p > "$OUT/10-main-chron-card.png"
 adb shell am broadcast -n $PKG/.debug.DemoReceiver --es chron off
+# Scheduled tasks list, dark theme, and large font checks.
+adb shell input swipe 540 1500 540 400 300; sleep 1
+adb exec-out screencap -p > "$OUT/11-main-tasks.png"
+adb shell cmd uimode night yes; sleep 2
+adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 2
+adb exec-out screencap -p > "$OUT/12-dark-top.png"
+adb shell input swipe 540 1500 540 400 300; sleep 1
+adb exec-out screencap -p > "$OUT/13-dark-tasks.png"
+adb shell cmd uimode night no
+adb shell settings put system font_scale 1.3; sleep 2
+adb shell am force-stop $PKG; adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 4
+adb exec-out screencap -p > "$OUT/14-large-font.png"
+adb shell settings put system font_scale 1.0
 ls -la "$OUT"
 [ -f "$OUT/SELFTEST_FAILED" ] && exit 1 || exit 0
