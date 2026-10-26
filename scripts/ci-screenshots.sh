@@ -58,7 +58,7 @@ adb shell input swipe 540 1500 540 400 300; sleep 1
 adb exec-out screencap -p > "$OUT/13-dark-tasks.png"
 adb shell cmd uimode night no
 adb shell settings put system font_scale 1.3; sleep 2
-adb shell am force-stop $PKG; adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 4
+adb shell am force-stop $PKG; adb shell am start -n $PKG/.MainActivity >/dev/null; sleep 10
 adb exec-out screencap -p > "$OUT/14-large-font.png"
 adb shell settings put system font_scale 1.0
 ls -la "$OUT"
