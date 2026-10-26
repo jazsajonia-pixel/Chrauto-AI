@@ -295,7 +295,7 @@ fun ChrautoScreen(
         Modifier.fillMaxSize().background(Brand.Canvas)
     ) {
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).systemBarsPadding().imePadding()
+            Modifier.fillMaxSize().systemBarsPadding().imePadding().verticalScroll(rememberScrollState())
                 .padding(horizontal = 18.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
