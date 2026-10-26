@@ -59,7 +59,10 @@ class AgentOrchestrator(
         try {
             if (!device.isReady()) throw IllegalStateException("Accessibility Service is disabled. Enable Chrauto AI in Android Settings → Accessibility first.")
             // Open the network connection while we read the screen.
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { runCatching { provider.warmUp() } }
+            // Child of this run, so Stop cancels it too; bounded so it can't hold the run open.
+            kotlinx.coroutines.CoroutineScope(coroutineContext + kotlinx.coroutines.Dispatchers.IO).launch {
+                runCatching { kotlinx.coroutines.withTimeoutOrNull(8_000) { provider.warmUp() } }
+            }
             var observation = device.observe() ?: throw IllegalStateException("No accessible active window is available.")
             var actions = 0
             var requests = 0
@@ -142,8 +145,13 @@ class AgentOrchestrator(
                 device.settle(when (resolved) { is AgentAction.OpenApp -> 3_000; is AgentAction.Wait -> 300; else -> 1_600 })
                 observation = device.observe() ?: throw IllegalStateException("The screen could not be observed after the action.")
 
-                // A touch that changed nothing may have missed: try once more with an accessibility click.
-                if (resolved is AgentAction.Tap && resolved.viaGesture && observation.compactText().hashCode() == before) {
+                // A touch that changed nothing may have missed: try once more with an accessibility click,
+                // but never for Send/Pay/Delete-like targets, where an invisible first success would
+                // make the retry a duplicate.
+                if (resolved is AgentAction.Tap && resolved.viaGesture && observation.compactText().hashCode() == before &&
+                    SafetyPolicy.isIrreversibleLabel(label)) {
+                    log("The screen didn't visibly change after \"$label\"; not tapping it again automatically.")
+                } else if (resolved is AgentAction.Tap && resolved.viaGesture && observation.compactText().hashCode() == before) {
                     log("Nothing changed — trying a direct click")
                     result = device.execute(resolved.copy(viaGesture = false))
                     if (result.ok) { device.settle(1_200); observation = device.observe() ?: observation }

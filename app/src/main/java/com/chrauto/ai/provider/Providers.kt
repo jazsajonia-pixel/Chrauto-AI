@@ -1,7 +1,12 @@
 package com.chrauto.ai.provider
 
 import com.chrauto.ai.agent.UiObservation
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -165,7 +170,8 @@ internal object Http {
         var last: Exception? = null
         repeat(attempts) { attempt ->
             try {
-                return@withContext once(providerLabel, url, headers, body, timeoutMs)
+                val c = URL(url).openConnection() as HttpURLConnection
+                return@withContext c.cancellable { once(c, providerLabel, headers, body, timeoutMs) }
             } catch (e: ProviderHttpException) {
                 if (e.code != 429 && e.code < 500) throw e
                 last = e
@@ -174,13 +180,25 @@ internal object Http {
             } catch (e: IOException) {
                 last = IOException("Network problem talking to $providerLabel: ${e.message}")
             }
+            coroutineContext.ensureActive() // Stop pressed: don't retry or report a network error
             if (attempt < attempts - 1) delay(1_500L * (attempt + 1))
         }
         throw last ?: IOException("$providerLabel request failed")
     }
 
-    private fun once(label: String, url: String, headers: Map<String, String>, body: JSONObject?, timeoutMs: Int): String {
-        val c = URL(url).openConnection() as HttpURLConnection
+    /**
+     * Runs a blocking HttpURLConnection call so that cancelling the coroutine (Stop, task cancel)
+     * disconnects the socket at once instead of waiting for the read timeout.
+     */
+    private suspend fun <T> HttpURLConnection.cancellable(block: suspend () -> T): T = coroutineScope {
+        val done = AtomicBoolean(false)
+        val watcher = launch(start = CoroutineStart.UNDISPATCHED) {
+            try { awaitCancellation() } finally { if (!done.get()) runCatching { disconnect() } }
+        }
+        try { block() } finally { done.set(true); watcher.cancel() }
+    }
+
+    private fun once(c: HttpURLConnection, label: String, headers: Map<String, String>, body: JSONObject?, timeoutMs: Int): String {
         try {
             c.requestMethod = if (body == null) "GET" else "POST"
             c.connectTimeout = 15_000
@@ -220,6 +238,7 @@ internal object Http {
             try {
                 val c = URL(url).openConnection() as HttpURLConnection
                 try {
+                    val result = c.cancellable {
                     c.requestMethod = "POST"
                     c.connectTimeout = 10_000
                     c.readTimeout = timeoutMs
@@ -242,9 +261,11 @@ internal object Http {
                             if (!piece.isNullOrEmpty()) { out.append(piece); onDelta(piece) }
                         }
                     }
-                    return@withContext out.toString()
+                    out.toString()
+                    }
+                    return@withContext result
                 } catch (e: IOException) {
-                    c.disconnect(); throw e
+                    c.disconnect(); coroutineContext.ensureActive(); throw e
                 }
             } catch (e: ProviderHttpException) {
                 if (out.isNotEmpty() || attempt >= 1 || (e.code != 429 && e.code < 500)) throw e

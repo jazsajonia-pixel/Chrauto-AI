@@ -37,7 +37,9 @@ data class UiNodeSnapshot(
     val actions: List<String>,
     val hint: String? = null,
     val packageName: String? = null,
-    val checked: Boolean? = null
+    val checked: Boolean? = null,
+    /** Android view id (e.g. "com.viber.voip:id/send"), when the app exposes one. */
+    val viewId: String? = null
 )
 data class UiObservation(
     val packageName: String?,
@@ -119,4 +121,16 @@ object SafetyPolicy {
         if (approved) return false
         return task.lowercase().split(Regex("\\W+")).any(consequentialWords::contains)
     }
+
+    private val irreversibleWords = setOf(
+        "send", "submit", "pay", "buy", "purchase", "order", "delete", "remove", "post", "publish",
+        "confirm", "share", "transfer", "checkout", "place", "reply", "forward", "call"
+    )
+
+    /**
+     * True when tapping [label] could have an effect that must not happen twice (sending, paying,
+     * deleting...). Such taps are never repeated automatically, even if the screen looks unchanged.
+     */
+    fun isIrreversibleLabel(label: String): Boolean =
+        label.lowercase().split(Regex("[^\\p{L}\\p{N}]+")).any(irreversibleWords::contains)
 }

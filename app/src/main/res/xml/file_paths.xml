@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- Images attached to scheduled Viber messages (shared read-only with Viber at send time). -->
+    <files-path name="viber" path="viber/" />
+</paths>

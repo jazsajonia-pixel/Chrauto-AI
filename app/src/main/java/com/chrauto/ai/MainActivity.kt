@@ -56,16 +56,33 @@ import androidx.compose.ui.platform.LocalUriHandler
 import com.chrauto.ai.ui.Brand
 import com.chrauto.ai.ui.ChrautoTheme
 import com.chrauto.ai.ui.Mascot
+import com.chrauto.ai.ui.TaskActions
+import com.chrauto.ai.ui.TaskDetailScreen
+import com.chrauto.ai.ui.TaskEditorScreen
+import com.chrauto.ai.ui.TasksSection
+import com.chrauto.ai.ui.ViberComposerScreen
+import com.chrauto.ai.tasks.ScheduledTask
+import com.chrauto.ai.tasks.TaskKind
+import com.chrauto.ai.tasks.TaskRules
+import com.chrauto.ai.tasks.TaskRunner
+import com.chrauto.ai.tasks.TaskScheduler
+import com.chrauto.ai.tasks.TaskStore
+import com.chrauto.ai.viber.ViberShare
+import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
-    companion object { const val EXTRA_REQUEST_MIC = "request_mic" }
+    companion object { const val EXTRA_REQUEST_MIC = "request_mic"; const val EXTRA_TASK_ID = "task_id" }
 
     private lateinit var settings: SettingsStore
     private var accessibilityOn by mutableStateOf(false)
     private var micOn by mutableStateOf(false)
     private var chronOn by mutableStateOf(false)
+    private var exactAlarms by mutableStateOf(true)
+    private var openTaskId by mutableStateOf<String?>(null)
     private var startChronAfterMic = false
     private val micPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         micOn = granted
@@ -117,11 +134,60 @@ class MainActivity : ComponentActivity() {
                     onTalkNow = { if (!micOn) micPermission.launch(Manifest.permission.RECORD_AUDIO) else ChronEngine.listenNow(this) },
                     loadRecents = { settings.recents },
                     loadFavorites = { settings.favorites },
-                    onToggleFavorite = { settings.toggleFavorite(it) }
+                    onToggleFavorite = { settings.toggleFavorite(it) },
+                    taskStore = TaskRunner.store(this),
+                    taskActions = taskActions(),
+                    openTaskId = openTaskId,
+                    onOpenTaskConsumed = { openTaskId = null }
                 )
             }
         }
         handleIntent(intent)
+    }
+
+    private fun askNotifications() {
+        if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+            notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
+
+    private fun taskActions(): TaskActions {
+        val store = TaskRunner.store(this)
+        return TaskActions(
+            save = { t, base ->
+                store.saveEdited(t, base).also { err ->
+                    if (err == null) { if (t.status == com.chrauto.ai.tasks.TaskStatus.SCHEDULED) askNotifications(); TaskRunner.changed(this) }
+                }
+            },
+            delete = { id -> if (TaskRunner.activeId != id) { store.delete(id); TaskRunner.changed(this); cleanupImages(store) } },
+            runNow = { id, done -> TaskRunner.runNow(this, id, done) },
+            cancel = { id -> TaskRunner.cancel(this, id) },
+            retry = { id ->
+                val t = store.get(id)
+                val next = t?.let { TaskRules.retry(it, System.currentTimeMillis()) }
+                if (next == null) "Nothing can be retried safely. Check Unconfirmed messages in Viber first."
+                else { store.update(id) { cur -> if (cur.updatedAt == t.updatedAt) next else cur }; TaskRunner.changed(this); null }
+            },
+            markMessage = { id, msg, sent -> store.update(id) { TaskRules.markMessage(it, msg, sent, System.currentTimeMillis()) }; TaskRunner.changed(this) },
+            importImages = { uris ->
+                withContext(Dispatchers.IO) {
+                    val results = uris.map { ViberShare.importImage(this@MainActivity, it) }
+                    results.mapNotNull { it.getOrNull() } to results.firstNotNullOfOrNull { it.exceptionOrNull()?.message }
+                }
+            },
+            exactAlarms = exactAlarms,
+            requestExactAlarms = {
+                if (Build.VERSION.SDK_INT >= 31) runCatching {
+                    startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:$packageName")))
+                }
+            },
+            viberInstalled = ViberShare.isInstalled(this),
+            activeId = { TaskRunner.activeId }
+        )
+    }
+
+    private fun cleanupImages(store: TaskStore) {
+        val keep = store.tasks.value.flatMap { t -> t.viber?.messages.orEmpty().flatMap { it.images } }.toSet()
+        ViberShare.cleanup(this, keep)
     }
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handleIntent(intent) }
@@ -129,12 +195,15 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         refreshPermissions()
+        exactAlarms = TaskScheduler.canExact(this)
+        TaskRunner.kick(this, "app opened")
         if (settings.floatingAssistant) AccessibilityBridge.setAssistantVisible(true)
         if (settings.chronEnabled && micOn) startChron()
     }
 
     private fun handleIntent(intent: Intent?) {
         if (intent?.getBooleanExtra(EXTRA_REQUEST_MIC, false) == true && !micOn) micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        intent?.getStringExtra(EXTRA_TASK_ID)?.let { openTaskId = it }
     }
 
     private fun refreshPermissions() {
@@ -146,6 +215,7 @@ class MainActivity : ComponentActivity() {
 }
 
 const val DEFAULT_TASK = "Open Chrome and search for Kotlin Android development tutorials."
+private const val FAV = "Favorite: "
 private val QUICK_TASKS = listOf(
     "Open Chrome and search for Kotlin Android development tutorials.",
     "Open YouTube and search for lo-fi study music.",
@@ -180,8 +250,18 @@ fun ChrautoScreen(
     onTalkNow: () -> Unit = {},
     loadRecents: () -> List<String> = { emptyList() },
     loadFavorites: () -> List<String> = { emptyList() },
-    onToggleFavorite: (String) -> Boolean = { false }
+    onToggleFavorite: (String) -> Boolean = { false },
+    taskStore: TaskStore? = null,
+    taskActions: TaskActions = TaskActions(),
+    openTaskId: String? = null,
+    onOpenTaskConsumed: () -> Unit = {}
 ) {
+    // Simple in-app navigation: "home", "task:<id>", "edit:<id>", "new", "viber", "viber:<id>".
+    var screen by rememberSaveable { mutableStateOf("home") }
+    LaunchedEffect(openTaskId) { if (openTaskId != null) { screen = "task:$openTaskId"; onOpenTaskConsumed() } }
+    BackHandler(enabled = screen != "home") { screen = "home" }
+    val tasksFlow = taskStore?.tasks ?: remember { kotlinx.coroutines.flow.MutableStateFlow(emptyList<ScheduledTask>()) }
+    val tasks by tasksFlow.collectAsState()
     val scope = rememberCoroutineScope()
     var task by remember { mutableStateOf(initialTask) }
     var config by remember { mutableStateOf(initialConfig) }
@@ -201,8 +281,18 @@ fun ChrautoScreen(
         }
     }
 
+    when {
+        screen.startsWith("task:") -> { val id = screen.removePrefix("task:")
+            TaskDetailScreen(taskStore, id, taskActions, onBack = { screen = "home" },
+                onEdit = { eid -> screen = if (taskStore?.get(eid)?.kind == TaskKind.VIBER_BATCH) "viber:$eid" else "edit:$eid" }); return }
+        screen == "new" || screen.startsWith("edit:") -> {
+            TaskEditorScreen(taskStore, screen.removePrefix("edit:").takeIf { screen.startsWith("edit:") }, task, taskActions, onBack = { screen = "home" }); return }
+        screen == "viber" || screen.startsWith("viber:") -> {
+            ViberComposerScreen(taskStore, screen.removePrefix("viber:").takeIf { screen.startsWith("viber:") }, taskActions, onBack = { screen = "home" }); return }
+    }
+
     Box(
-        Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Brand.VioletSoft, Brand.Canvas, Brand.Canvas)))
+        Modifier.fillMaxSize().background(Brand.Canvas)
     ) {
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).systemBarsPadding().imePadding()
@@ -210,8 +300,10 @@ fun ChrautoScreen(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Header(state)
+            val setupDone = config.isUsable && accessibilityEnabled
+            StatusStrip(accessibilityEnabled, config.isUsable, taskActions.exactAlarms, onFix = { if (!accessibilityEnabled) onOpenAccessibility() else if (!taskActions.exactAlarms) taskActions.requestExactAlarms() })
 
-            SetupCard(
+            if (!setupDone) SetupCard(
                 config = config, onConfig = ::updateConfig,
                 onProvider = { p -> val c = loadConfig(p); config = c; onConfigChanged(c) },
                 accessibilityEnabled = accessibilityEnabled, onOpenAccessibility = onOpenAccessibility,
@@ -222,17 +314,17 @@ fun ChrautoScreen(
             )
 
             SectionCard {
-                Text("What should I do?", style = MaterialTheme.typography.titleMedium)
+                Text("New task", style = MaterialTheme.typography.titleMedium)
                 OutlinedTextField(
                     task, { task = it }, Modifier.fillMaxWidth().testTag("taskInput"),
-                    placeholder = { Text("e.g. Open Chrome and search for cute cat videos") },
+                    placeholder = { Text("e.g. Open Chrome and search for today's weather") },
                     minLines = 2, maxLines = 5, shape = RoundedCornerShape(16.dp)
                 )
-                val chips = (favorites.map { "★ $it" } + recents.filterNot { r -> favorites.any { it.equals(r, true) } } + QUICK_TASKS)
-                    .distinctBy { it.removePrefix("★ ").lowercase() }.take(14)
+                val chips = (favorites.map { "$FAV$it" } + recents.filterNot { r -> favorites.any { it.equals(r, true) } } + QUICK_TASKS)
+                    .distinctBy { it.removePrefix(FAV).lowercase() }.take(14)
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     chips.forEach { q ->
-                        SuggestionChip(onClick = { task = q.removePrefix("★ ") }, label = { Text(q.removeSuffix("."), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 220.dp)) },
+                        SuggestionChip(onClick = { task = q.removePrefix(FAV) }, label = { Text(q.removeSuffix("."), maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 220.dp)) },
                             shape = RoundedCornerShape(50))
                     }
                 }
@@ -240,8 +332,9 @@ fun ChrautoScreen(
                     Button(
                         enabled = !running && task.isNotBlank() && config.isUsable,
                         modifier = Modifier.weight(1f).height(52.dp).testTag("runButton"),
-                        shape = RoundedCornerShape(16.dp),
+                        shape = RoundedCornerShape(12.dp),
                         onClick = {
+                            if (runJob?.isActive == true) return@Button
                             val c = config
                             runJob = scope.launch {
                                 val custom = runTask
@@ -253,8 +346,8 @@ fun ChrautoScreen(
                         Icon(painterResource(R.drawable.ic_play), null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("Run task")
                     }
                     OutlinedButton(
-                        enabled = running, modifier = Modifier.height(52.dp).testTag("stopButton"), shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Brand.Coral),
+                        enabled = running, modifier = Modifier.height(52.dp).testTag("stopButton"), shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Brand.Danger),
                         onClick = {
                             runJob?.cancel(); AgentController.stop()
                             state = state.copy(status = RunStatus.CANCELLED, phase = AgentPhase.DONE, logs = state.logs + AgentLog("Cancelled by user."))
@@ -263,21 +356,33 @@ fun ChrautoScreen(
                 }
                 val isFav = favorites.any { it.equals(task.trim(), true) }
                 if (task.isNotBlank()) TextButton(onClick = { onToggleFavorite(task); favTick++ }, contentPadding = PaddingValues(horizontal = 4.dp), modifier = Modifier.testTag("favoriteButton")) {
-                    Text(if (isFav) "★ Saved to favorites" else "☆ Save to favorites", fontSize = 13.sp)
+                    Text(if (isFav) "Saved to favorites" else "Save to favorites", fontSize = 13.sp)
                 }
                 if (!config.isUsable) Text("Add your ${config.provider.label} API key above to start.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                else if (!accessibilityEnabled) Text("Tip: turn on the Accessibility service so I can see and tap the screen.", style = MaterialTheme.typography.bodySmall, color = Brand.Amber)
+                else if (!accessibilityEnabled) Text("Turn on the accessibility service so Chrauto can read and tap the screen.", style = MaterialTheme.typography.bodySmall, color = Brand.Warn)
             }
+
+            TasksSection(tasks, onOpen = { screen = "task:$it" }, onNewTask = { screen = "new" }, onNewViber = { screen = "viber" })
 
             ChronCard(chron, chronEnabled, onChronChanged, initialWakeName, onWakeNameChanged, onTalkNow)
 
+            if (setupDone) SetupCard(
+                config = config, onConfig = ::updateConfig,
+                onProvider = { p -> val c = loadConfig(p); config = c; onConfigChanged(c) },
+                accessibilityEnabled = accessibilityEnabled, onOpenAccessibility = onOpenAccessibility,
+                micGranted = micGranted, onRequestMic = onRequestMic,
+                floatingAssistant = floatingAssistant, onFloatingAssistantChanged = onFloatingAssistantChanged,
+                voiceReplies = voiceReplies, onVoiceRepliesChanged = onVoiceRepliesChanged,
+                canStoreKey = canStoreKey
+            )
+
             StatusCard(state, onApprove = {
                 val c = config
-                runJob = scope.launch { AgentController.runAndAwait(state.task.ifBlank { task }, c, { state = it }, approved = true) }
+                if (runJob?.isActive != true) runJob = scope.launch { AgentController.runAndAwait(state.task.ifBlank { task }, c, { state = it }, approved = true) }
             })
 
             Text(
-                "Your API key stays on this phone (encrypted) and is only sent to Google's Gemini API. It is never written to logs. Device-local keys can still be exposed on a compromised device.",
+                "Your API key stays on this phone (encrypted) and is only sent to the AI provider you picked, together with a text description of the screen. It is never written to logs. Device-local keys can still be exposed on a compromised device.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(horizontal = 4.dp, vertical = 8.dp)
             )
@@ -294,22 +399,43 @@ private fun Header(state: AgentState) {
         else -> Mood.IDLE
     }
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-        Mascot(mood, 76.dp)
+        Mascot(mood, 32.dp)
         Spacer(Modifier.width(10.dp))
         Column(Modifier.weight(1f)) {
-            Text("Chrauto AI", style = MaterialTheme.typography.headlineMedium)
-            Text("Your little phone helper. Tell me what to do and I'll tap through it.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Chrauto", style = MaterialTheme.typography.headlineSmall)
+            Text("Phone automation agent", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+/** One-line readiness summary: what the agent can do right now. */
+@Composable
+private fun StatusStrip(accessibility: Boolean, aiReady: Boolean, exactAlarms: Boolean, onFix: () -> Unit) {
+    @Composable fun chip(label: String, ok: Boolean) {
+        Row(
+            Modifier.clip(RoundedCornerShape(50)).background(if (ok) Brand.SuccessSoft else Brand.WarnSoft).clickable(onClick = onFix)
+                .heightIn(min = 32.dp).padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(Modifier.size(6.dp).clip(CircleShape).background(if (ok) Brand.Success else Brand.Warn))
+            Spacer(Modifier.width(6.dp))
+            Text(label, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = if (ok) Brand.Success else Brand.Warn, maxLines = 1)
+        }
+    }
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).testTag("statusStrip"), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        chip(if (accessibility) "Accessibility on" else "Accessibility off", accessibility)
+        chip(if (aiReady) "AI provider ready" else "AI key missing", aiReady)
+        chip(if (exactAlarms) "Exact scheduling" else "Approximate scheduling", exactAlarms)
     }
 }
 
 @Composable
 private fun SectionCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Card(
-        modifier.fillMaxWidth(), shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
-    ) { Column(Modifier.padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content) }
+        modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = Brand.Card),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+    ) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp), content = content) }
 }
 
 @Composable
@@ -328,10 +454,10 @@ private fun SetupCard(
     SectionCard {
         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { expanded = !expanded }, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                Text(if (done == 3) "All set" else "Setup", style = MaterialTheme.typography.titleMedium)
+                Text(if (done == 3) "Settings and permissions" else "Setup", style = MaterialTheme.typography.titleMedium)
                 Text("$done of 3 ready · ${config.provider.label} · ${config.model}", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
-            LinearProgressIndicator(progress = { done / 3f }, modifier = Modifier.width(64.dp).clip(CircleShape), color = Brand.Mint, trackColor = Brand.MintSoft)
+            LinearProgressIndicator(progress = { done / 3f }, modifier = Modifier.width(64.dp).clip(CircleShape), color = Brand.Success, trackColor = Brand.SuccessSoft)
             Spacer(Modifier.width(8.dp))
             Icon(painterResource(R.drawable.ic_settings), "Toggle setup", Modifier.size(22.dp).rotate(arrow), tint = Brand.Muted)
         }
@@ -349,7 +475,7 @@ private fun SetupCard(
                     if (!micGranted) FilledTonalButton(onClick = onRequestMic, shape = RoundedCornerShape(12.dp)) { Text("Allow", fontSize = 13.sp) }
                 }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                ToggleRow("Floating assistant", "Cute bubble with voice, stop, and retry buttons", floatingAssistant, onFloatingAssistantChanged)
+                ToggleRow("Floating assistant", "Small on-screen control with voice, stop and repeat", floatingAssistant, onFloatingAssistantChanged)
                 ToggleRow("Voice replies", "The assistant talks back when it starts or finishes", voiceReplies, onVoiceRepliesChanged)
             }
         }
@@ -378,15 +504,15 @@ private fun ChronCard(
     }
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Mascot(mood, 46.dp)
+            Mascot(mood, 28.dp)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Talk to $name", style = MaterialTheme.typography.titleMedium)
                     if (chron.live) {
                         Spacer(Modifier.width(8.dp))
-                        Box(Modifier.clip(RoundedCornerShape(50)).background(Brand.CoralSoft).padding(horizontal = 8.dp, vertical = 2.dp).testTag("liveBadge")) {
-                            Text("● LIVE", color = Brand.Coral, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                        Box(Modifier.clip(RoundedCornerShape(50)).background(Brand.DangerSoft).padding(horizontal = 8.dp, vertical = 2.dp).testTag("liveBadge")) {
+                            Text("LIVE", color = Brand.Danger, fontSize = 11.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -398,7 +524,7 @@ private fun ChronCard(
                         ChronEngine.Mode.SPEAKING -> if (chron.duplex) "Talking… just speak to interrupt" else "Talking…"
                         ChronEngine.Mode.OFF -> chron.error ?: if (enabled) "Starting…" else "Say “$name, open YouTube” or ask a question"
                     },
-                    style = MaterialTheme.typography.bodySmall, color = if (chron.mode == ChronEngine.Mode.ACTIVE) Brand.Violet else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall, color = if (chron.mode == ChronEngine.Mode.ACTIVE) Brand.Accent else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
             }
@@ -458,8 +584,8 @@ private fun ChatBubble(text: String, mine: Boolean) {
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
         Box(
             Modifier.widthIn(max = 280.dp).clip(RoundedCornerShape(18.dp, 18.dp, if (mine) 4.dp else 18.dp, if (mine) 18.dp else 4.dp))
-                .background(if (mine) Brand.Violet else Brand.VioletSoft).padding(horizontal = 12.dp, vertical = 8.dp)
-        ) { Text(text, color = if (mine) Color.White else Brand.Ink, style = MaterialTheme.typography.bodyMedium) }
+                .background(if (mine) Brand.Accent else Brand.AccentSoft).padding(horizontal = 12.dp, vertical = 8.dp)
+        ) { Text(text, color = if (mine) MaterialTheme.colorScheme.onPrimary else Brand.Ink, style = MaterialTheme.typography.bodyMedium) }
     }
 }
 
@@ -488,7 +614,7 @@ private fun ProviderSection(config: AiConfig, onConfig: (AiConfig) -> Unit, onPr
                     }
                     PriceBadge(p.pricing)
                     Spacer(Modifier.width(6.dp))
-                    Text("▾", color = Brand.Muted, fontSize = 18.sp)
+                    Icon(painterResource(R.drawable.ic_settings), null, Modifier.size(18.dp), tint = Brand.Muted)
                 }
             }
             DropdownMenu(pickerOpen, onDismissRequest = { pickerOpen = false }, modifier = Modifier.heightIn(max = 460.dp)) {
@@ -497,7 +623,7 @@ private fun ProviderSection(config: AiConfig, onConfig: (AiConfig) -> Unit, onPr
                         text = {
                             Column {
                                 Text(kind.label, fontWeight = if (kind == p) FontWeight.Bold else FontWeight.Normal)
-                                Text(kind.pricing, fontSize = 12.sp, color = if (isFree(kind.pricing)) Brand.Mint else Brand.Muted)
+                                Text(kind.pricing, fontSize = 12.sp, color = if (isFree(kind.pricing)) Brand.Success else Brand.Muted)
                             }
                         },
                         onClick = { pickerOpen = false; if (kind != p) onProvider(kind) }
@@ -523,7 +649,7 @@ private fun ProviderSection(config: AiConfig, onConfig: (AiConfig) -> Unit, onPr
             }
         )
         TextButton(onClick = { runCatching { uri.openUri(p.keyUrl) } }, contentPadding = PaddingValues(horizontal = 4.dp)) {
-            Text(if (isFree(p.pricing)) "Get a free ${p.label} key →" else "Get a ${p.label} key →", fontSize = 13.sp)
+            Text(if (isFree(p.pricing)) "Get a free ${p.label} key" else "Get a ${p.label} key", fontSize = 13.sp)
         }
 
         Box {
@@ -539,7 +665,7 @@ private fun ProviderSection(config: AiConfig, onConfig: (AiConfig) -> Unit, onPr
                                 .onFailure { modelError = it.message ?: "Couldn't load models" }
                             loading = false
                         }
-                    }) { Text(if (loading) "…" else "Load", fontSize = 13.sp) }
+                    }) { Text(if (loading) "Loading" else "Load", fontSize = 13.sp) }
                 }
             )
             DropdownMenu(modelsOpen, onDismissRequest = { modelsOpen = false }, modifier = Modifier.heightIn(max = 420.dp)) {
@@ -567,8 +693,8 @@ private fun isFree(pricing: String) = pricing.contains("free", ignoreCase = true
 @Composable
 private fun PriceBadge(text: String) {
     val free = isFree(text)
-    Box(Modifier.clip(RoundedCornerShape(50)).background(if (free) Brand.MintSoft else Color(0xFFF0EEF5)).padding(horizontal = 8.dp, vertical = 3.dp)) {
-        Text(if (free) text.substringBefore(" ·") else text.substringBefore(" ·"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (free) Brand.Mint else Brand.Muted, maxLines = 1)
+    Box(Modifier.clip(RoundedCornerShape(50)).background(if (free) Brand.SuccessSoft else Brand.Chip).padding(horizontal = 8.dp, vertical = 3.dp)) {
+        Text(if (free) text.substringBefore(" ·") else text.substringBefore(" ·"), fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = if (free) Brand.Success else Brand.Muted, maxLines = 1)
     }
 }
 
@@ -576,12 +702,12 @@ private fun PriceBadge(text: String) {
 private fun StepRow(n: Int, title: String, subtitle: String, done: Boolean, action: @Composable () -> Unit = {}) {
     Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
         Box(
-            Modifier.size(30.dp).clip(CircleShape).background(if (done) Brand.MintSoft else Brand.VioletSoft)
-                .border(1.dp, if (done) Brand.Mint else Brand.Violet.copy(alpha = 0.3f), CircleShape),
+            Modifier.size(30.dp).clip(CircleShape).background(if (done) Brand.SuccessSoft else Brand.AccentSoft)
+                .border(1.dp, if (done) Brand.Success else Brand.Accent.copy(alpha = 0.3f), CircleShape),
             contentAlignment = Alignment.Center
         ) {
-            if (done) Icon(painterResource(R.drawable.ic_check), null, Modifier.size(18.dp), tint = Brand.Mint)
-            else Text("$n", fontWeight = FontWeight.Bold, color = Brand.Violet, fontSize = 14.sp)
+            if (done) Icon(painterResource(R.drawable.ic_check), null, Modifier.size(18.dp), tint = Brand.Success)
+            else Text("$n", fontWeight = FontWeight.Bold, color = Brand.Accent, fontSize = 14.sp)
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
@@ -606,44 +732,44 @@ private fun ToggleRow(title: String, subtitle: String, checked: Boolean, onChang
 @Composable
 private fun StatusCard(state: AgentState, onApprove: () -> Unit = {}) {
     val (label, fg, bg) = when (state.status) {
-        RunStatus.IDLE -> Triple("Ready", Brand.Violet, Brand.VioletSoft)
-        RunStatus.RUNNING -> Triple("Working", Brand.Violet, Brand.VioletSoft)
-        RunStatus.SUCCEEDED -> Triple("Done", Brand.Mint, Brand.MintSoft)
-        RunStatus.FAILED -> Triple("Stuck", Brand.Coral, Brand.CoralSoft)
-        RunStatus.CANCELLED -> Triple("Stopped", Brand.Muted, Color(0xFFF0EEF5))
-        RunStatus.NEEDS_ASSISTANCE -> Triple("Needs you", Brand.Amber, Brand.AmberSoft)
+        RunStatus.IDLE -> Triple("Ready", Brand.Muted, Brand.Chip)
+        RunStatus.RUNNING -> Triple("Running", Brand.Accent, Brand.AccentSoft)
+        RunStatus.SUCCEEDED -> Triple("Completed", Brand.Success, Brand.SuccessSoft)
+        RunStatus.FAILED -> Triple("Failed", Brand.Danger, Brand.DangerSoft)
+        RunStatus.CANCELLED -> Triple("Cancelled", Brand.Muted, Brand.Chip)
+        RunStatus.NEEDS_ASSISTANCE -> Triple("Waiting for user", Brand.Warn, Brand.WarnSoft)
     }
     SectionCard {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Status: ${state.status}", modifier = Modifier.weight(1f).testTag("status"), style = MaterialTheme.typography.titleMedium)
+            Text("Current run", modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
             Box(Modifier.clip(RoundedCornerShape(50)).background(bg).padding(horizontal = 12.dp, vertical = 5.dp)) {
-                Text(label, color = fg, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                Text("Status: $label", color = fg, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, modifier = Modifier.testTag("status"))
             }
         }
         AnimatedVisibility(state.status == RunStatus.RUNNING) {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Text(
                     (if (state.step > 0 && (state.phase == AgentPhase.MOVING || state.phase == AgentPhase.ACTING)) "Step ${state.step} · " else "") + state.detail.ifBlank { "Working…" },
-                    style = MaterialTheme.typography.bodyMedium, color = Brand.Violet, maxLines = 2, overflow = TextOverflow.Ellipsis
+                    style = MaterialTheme.typography.bodyMedium, color = Brand.Accent, maxLines = 2, overflow = TextOverflow.Ellipsis
                 )
-                LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Brand.Violet, trackColor = Brand.VioletSoft)
+                LinearProgressIndicator(Modifier.fillMaxWidth().clip(CircleShape), color = Brand.Accent, trackColor = Brand.AccentSoft)
             }
         }
         if (state.status == RunStatus.NEEDS_ASSISTANCE) {
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Brand.AmberSoft).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text("I paused before doing something important: ${state.detail}", style = MaterialTheme.typography.bodyMedium, color = Brand.Ink)
+            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Brand.WarnSoft).padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Paused before an important step: ${state.detail}", style = MaterialTheme.typography.bodyMedium, color = Brand.Ink)
                 Button(onClick = onApprove, modifier = Modifier.testTag("approveButton"), shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Brand.Amber)) { Text("Approve & continue") }
+                    colors = ButtonDefaults.buttonColors(containerColor = Brand.Warn)) { Text("Approve & continue") }
             }
         }
         if (state.logs.isEmpty()) {
-            Text("Activity will show up here. Tip: once the accessibility service is on, tap the floating buddy and use the mic to give commands from any app.",
+            Text("No run yet. Each step Chrauto observes, plans and verifies is listed here. With the accessibility service on, you can also start tasks from the floating control in any app.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 state.logs.takeLast(40).forEach { log ->
                     Row(verticalAlignment = Alignment.Top) {
-                        Box(Modifier.padding(top = 6.dp).size(8.dp).clip(CircleShape).background(if (log.isError) Brand.Coral else Brand.Violet.copy(alpha = 0.5f)))
+                        Box(Modifier.padding(top = 6.dp).size(8.dp).clip(CircleShape).background(if (log.isError) Brand.Danger else Brand.Accent.copy(alpha = 0.5f)))
                         Spacer(Modifier.width(10.dp))
                         Text(
                             if (log.isError) "Error: ${log.message}" else log.message,

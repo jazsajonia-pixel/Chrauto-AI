@@ -70,6 +70,34 @@ object AgentController {
         }
     }
 
+    /**
+     * Runs [task] with saved settings for a scheduled task and returns the final state. Refuses to
+     * replace a run that is already in progress (the caller retries later instead).
+     */
+    suspend fun runForTask(task: String, approved: Boolean): AgentState {
+        val ctx = appContext ?: return AgentState(RunStatus.FAILED, listOf(AgentLog("App not initialised", true)), task, detail = "App not initialised")
+        if (isRunning) return AgentState(RunStatus.FAILED, task = task, detail = BUSY)
+        val config = SettingsStore(ctx).config()
+        if (!config.isUsable) return AgentState(RunStatus.FAILED, task = task, detail = "Add your ${config.provider.label} API key in Chrauto first.")
+        var last = AgentState()
+        runAndAwait(task, config, { last = it }, approved)
+        return last
+    }
+
+    const val BUSY = "Another task is running"
+
+    /** The accessibility service went away: stop and say so, instead of a plain "Stopped". */
+    fun onServiceLost() {
+        val active = job?.isActive == true
+        job?.cancel()
+        if (active || _state.value.status == RunStatus.RUNNING) {
+            _state.value = _state.value.copy(
+                status = RunStatus.FAILED, phase = AgentPhase.DONE, detail = "Accessibility service was turned off", target = null,
+                logs = _state.value.logs + AgentLog("Accessibility service was turned off; the task stopped.", true)
+            )
+        }
+    }
+
     fun stop() {
         val active = job?.isActive == true
         job?.cancel()

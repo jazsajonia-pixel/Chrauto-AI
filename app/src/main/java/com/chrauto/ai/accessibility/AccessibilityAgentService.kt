@@ -35,12 +35,15 @@ object AccessibilityBridge : com.chrauto.ai.agent.DeviceBridge {
     /** Retries briefly: during app switches the active window is often momentarily unavailable. */
     override suspend fun observe(): UiObservation? {
         repeat(8) {
-            val obs = service?.snapshot()
+            val obs = snapshotOffMain()
             if (obs != null && obs.nodes.isNotEmpty()) return obs
             kotlinx.coroutines.delay(250)
         }
-        return service?.snapshot()
+        return snapshotOffMain()
     }
+
+    /** Walking the node tree is hundreds of IPC calls; keep it off the UI thread so the app never stutters. */
+    private suspend fun snapshotOffMain(): UiObservation? = withContext(Dispatchers.Default) { runCatching { service?.snapshot() }.getOrNull() }
     override suspend fun execute(action: AgentAction) = service?.executeAction(action) ?: ActionResult(false, "Accessibility Service unavailable")
     override suspend fun settle(maxMs: Long) { service?.settle(maxMs) ?: kotlinx.coroutines.delay(minOf(maxMs, 600)) }
 }
@@ -66,6 +69,15 @@ class AccessibilityAgentService : AccessibilityService() {
         s.launch { com.chrauto.ai.voice.ChronEngine.state.collect { overlay?.renderChron(it) } }
         s.launch { com.chrauto.ai.voice.ChronEngine.level.collect { overlay?.renderLevel(it) } }
         if (SettingsStore(this).chronEnabled && !com.chrauto.ai.voice.ChronService.running) com.chrauto.ai.voice.ChronService.start(this)
+        // Scheduled tasks waiting for the screen/unlock resume when the user unlocks the phone.
+        runCatching {
+            androidx.core.content.ContextCompat.registerReceiver(this, unlockReceiver, android.content.IntentFilter().apply { addAction(Intent.ACTION_USER_PRESENT); addAction(Intent.ACTION_SCREEN_ON) }, androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED)
+        }
+        com.chrauto.ai.tasks.TaskRunner.kick(this, "accessibility connected")
+    }
+
+    private val unlockReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context, intent: Intent) { com.chrauto.ai.tasks.TaskRunner.kick(context, if (intent.action == Intent.ACTION_SCREEN_ON) "screen on" else "phone unlocked") }
     }
 
     fun setAssistantVisible(visible: Boolean) {
@@ -86,7 +98,8 @@ class AccessibilityAgentService : AccessibilityService() {
         connected.set(false)
         overlay?.detach(); overlay = null
         scope?.cancel(); scope = null
-        AgentController.stop()
+        runCatching { unregisterReceiver(unlockReceiver) }
+        AgentController.onServiceLost()
     }
     override fun onInterrupt() {}
     @Volatile private var lastEventAt = 0L
@@ -140,7 +153,8 @@ class AccessibilityAgentService : AccessibilityService() {
             node.actionList.map { it.id.toString() },
             checked = if (node.isCheckable) node.isChecked else null,
             hint = if (password) null else node.hintText?.toString()?.take(200),
-            packageName = node.packageName?.toString()
+            packageName = node.packageName?.toString(),
+            viewId = node.viewIdResourceName
         )
         for (index in 0 until node.childCount) node.getChild(index)?.let { child -> collect(child, "$path.$index", out) }
     }

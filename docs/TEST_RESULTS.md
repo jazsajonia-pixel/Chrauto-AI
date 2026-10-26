@@ -15,3 +15,9 @@ No Android device or emulator and no user Gemini API key were available in this 
 ## Automated coverage present
 
 `ActionProtocolTest` covers valid semantic targets, stale/unsafe targets, bounded waits, and consequential-action confirmation. `ActionPlanParserTest` covers typed JSON, malformed JSON, and unknown actions. `MainActivityUiTest` covers Compose validation, injected running/completed state, cancellation, and accessibility setup callback behavior. `AccessibilityActionExecutorEspressoTest` covers the semantic accessibility executor against target-process Android views for tap/text/scroll/back dispatch and honest failure for invalid/unsupported actions; production uses the same executor with sealed `AccessibilityService` node targets. JVM tests run through `./gradlew testDebugUnitTest`; instrumentation tests run through `./gradlew connectedDebugAndroidTest` on the CI API 35 emulator.
+
+## 0.6.0 (2026-10-26)
+
+Local sandbox (JDK 21, Android SDK 36, Gradle 9.6.0): `./gradlew testDebugUnitTest` passed (79 JVM tests, 0 failures, including 34 new tests for task rules, persistence, single-claim under concurrency, the task engine with fakes, and the Viber screen logic and sender with scripted screens). `assembleDebug` and `compileDebugAndroidTestKotlin` passed. Instrumentation results and the CI run for this version are recorded in the knowledge-repo handoff.
+
+Not tested: any behaviour on a real phone, including the TECNO checklist in `docs/SCHEDULING_AND_VIBER.md`, real Viber screens, exact-alarm timing, and reboot recovery.

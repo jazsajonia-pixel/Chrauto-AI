@@ -19,7 +19,6 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
-import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -38,9 +37,9 @@ import kotlin.math.hypot
 /**
  * Floating assistant drawn as accessibility overlays (no extra "draw over apps" permission).
  *
- *  - Dock: a draggable mascot bubble at the bottom. Tapping it pops open a compact panel
+ *  - Dock: a draggable agent-mark bubble at the bottom. Tapping it pops open a compact panel
  *    (one status line + one row of buttons) so it never covers more than a thin strip of the screen.
- *  - Cursor buddy: a non-touchable mini mascot that flies to whatever the agent is about to
+ *  - Agent cursor: a non-touchable small agent mark that flies to whatever the agent is about to
  *    tap/type/scroll and shows a loader while thinking.
  *
  * The agent acts through accessibility node actions, not screen-coordinate taps, so it can't
@@ -68,32 +67,32 @@ class AssistantOverlay(private val context: Context) {
     // ---------- Dock ----------
     private val bubble = MascotView(context).apply { contentDescription = "Chrauto assistant" }
     private val statusText = TextView(context).apply {
-        textSize = 12.5f; setTextColor(MascotColors.INK); maxLines = 2; ellipsize = TextUtils.TruncateAt.END
+        textSize = 12.5f; setTextColor(MascotColors.PANEL_TEXT); maxLines = 2; ellipsize = TextUtils.TruncateAt.END
         typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         setPadding(dp(4), 0, dp(4), dp(6))
     }
-    private val micBtn = roundButton(R.drawable.ic_mic, "Talk to Chron", MascotColors.VIOLET) { ChronEngine.listenNow(context) }
-    private val stopBtn = roundButton(R.drawable.ic_stop, "Stop", MascotColors.CORAL) {
+    private val micBtn = roundButton(R.drawable.ic_mic, "Talk to Chron", MascotColors.ACCENT) { ChronEngine.listenNow(context) }
+    private val stopBtn = roundButton(R.drawable.ic_stop, "Stop", MascotColors.DANGER) {
         if (AgentController.isRunning) { AgentController.stop(); ChronEngine.announce("Okay, stopped.") } else ChronEngine.hush()
     }
-    private val retryBtn = roundButton(R.drawable.ic_replay, "Repeat last task", 0xFF4C9AFF.toInt()) { retryLast() }
-    private val appBtn = roundButton(R.drawable.ic_home, "Open Chrauto", 0xFF8E7CC3.toInt()) { openApp() }
-    private val hideBtn = roundButton(R.drawable.ic_close, "Hide assistant", 0xFF9AA0B4.toInt()) { hide() }
+    private val retryBtn = roundButton(R.drawable.ic_replay, "Repeat last task", 0xFF2A3550.toInt()) { retryLast() }
+    private val appBtn = roundButton(R.drawable.ic_home, "Open Chrauto", 0xFF2A3550.toInt()) { openApp() }
+    private val hideBtn = roundButton(R.drawable.ic_close, "Hide assistant", 0xFF2A3550.toInt()) { hide() }
     private val buttons = listOf(micBtn, stopBtn, retryBtn, appBtn, hideBtn)
 
     private val panel = LinearLayout(context).apply {
         orientation = LinearLayout.VERTICAL
         background = GradientDrawable().apply {
-            cornerRadius = dp(24).toFloat(); setColor(0xF7FFFFFF.toInt()); setStroke(dp(1.5f), 0x337C5CFF)
+            cornerRadius = dp(16).toFloat(); setColor(MascotColors.PANEL); setStroke(dp(1), 0x334F7CFF)
         }
         elevation = dp(8).toFloat()
         setPadding(dp(12), dp(10), dp(12), dp(10))
         visibility = View.GONE
-        addView(statusText, LinearLayout.LayoutParams(dp(236), LinearLayout.LayoutParams.WRAP_CONTENT))
+        addView(statusText, LinearLayout.LayoutParams(dp(272), LinearLayout.LayoutParams.WRAP_CONTENT))
         addView(LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             buttons.forEachIndexed { i, b ->
-                addView(b, LinearLayout.LayoutParams(dp(40), dp(40)).apply { if (i > 0) marginStart = dp(9) })
+                addView(b, LinearLayout.LayoutParams(dp(48), dp(48)).apply { if (i > 0) marginStart = dp(8) })
             }
         })
     }
@@ -103,7 +102,7 @@ class AssistantOverlay(private val context: Context) {
         clipChildren = false; clipToPadding = false
         setPadding(dp(6), dp(6), dp(6), dp(6))
         addView(panel, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { marginEnd = dp(6) })
-        addView(bubble, LinearLayout.LayoutParams(dp(62), dp(62)))
+        addView(bubble, LinearLayout.LayoutParams(dp(48), dp(48)))
     }
     private val dockParams = WindowManager.LayoutParams(
         WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -113,7 +112,7 @@ class AssistantOverlay(private val context: Context) {
     ).apply { gravity = Gravity.BOTTOM or Gravity.END; x = dp(10); y = dp(28) }
 
     // ---------- Cursor buddy ----------
-    private val cursorSize = dp(112)
+    private val cursorSize = dp(84)
     private val cursor = CursorBuddyView(context)
     private var cursorShown = false
     private var cursorAnim: ValueAnimator? = null
@@ -248,13 +247,13 @@ class AssistantOverlay(private val context: Context) {
             }
             running -> (if (s.step > 0 && (s.phase == AgentPhase.MOVING || s.phase == AgentPhase.ACTING)) "Step ${s.step} · " else "") + s.detail.ifBlank { "Working…" }
             s.status == RunStatus.SUCCEEDED -> "Done: ${s.detail}"
-            s.status == RunStatus.FAILED -> "Stuck: ${s.detail}"
-            s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs you: ${s.detail} · tap ↻ to approve"
-            s.status == RunStatus.CANCELLED -> "Stopped. Tap the mic for a new task."
+            s.status == RunStatus.FAILED -> "Failed: ${s.detail}"
+            s.status == RunStatus.NEEDS_ASSISTANCE -> "Needs approval: ${s.detail} · tap ↻ to continue"
+            s.status == RunStatus.CANCELLED -> "Stopped. Tap the mic to start a new task."
             chron.mode == ChronEngine.Mode.PASSIVE -> "Say “${settings.wakeName}, …” or tap the mic"
-            else -> "Hi! Tap the mic and tell me what to do."
+            else -> "Tap the mic and describe a task."
         }, override = false)
-        micBtn.tint(if (listening) MascotColors.PINK else MascotColors.VIOLET)
+        micBtn.tint(if (listening) MascotColors.ACCENT_SOFT else MascotColors.ACCENT)
         micBtn.contentDescription = if (chron.mode == ChronEngine.Mode.SPEAKING) "Interrupt and talk" else "Talk to Chron"
         val canStop = running || chron.mode == ChronEngine.Mode.SPEAKING
         stopBtn.isEnabled = canStop; stopBtn.alpha = if (canStop) 1f else 0.35f
@@ -285,14 +284,14 @@ class AssistantOverlay(private val context: Context) {
         expanded = true
         boing()
         panel.visibility = View.VISIBLE
-        panel.alpha = 0f; panel.scaleX = 0.4f; panel.scaleY = 0.7f
+        panel.alpha = 0f; panel.scaleX = 0.92f; panel.scaleY = 0.92f
         panel.post {
             panel.pivotX = panel.width.toFloat(); panel.pivotY = panel.height.toFloat()
-            panel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(300).setInterpolator(OvershootInterpolator(1.4f)).start()
+            panel.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
         }
         buttons.forEachIndexed { i, b ->
-            b.scaleX = 0f; b.scaleY = 0f
-            b.animate().scaleX(1f).scaleY(1f).setStartDelay(90L + i * 45L).setDuration(240).setInterpolator(OvershootInterpolator(2.2f)).start()
+            b.alpha = 0f
+            b.animate().alpha(1f).setStartDelay(40L + i * 20L).setDuration(140).start()
         }
         refresh()
     }
@@ -301,14 +300,14 @@ class AssistantOverlay(private val context: Context) {
         if (!expanded) return
         expanded = false
         boing()
-        panel.animate().alpha(0f).scaleX(0.4f).scaleY(0.7f).setDuration(180).setInterpolator(DecelerateInterpolator())
+        panel.animate().alpha(0f).scaleX(0.92f).scaleY(0.92f).setDuration(140).setInterpolator(DecelerateInterpolator())
             .withEndAction { if (!expanded) panel.visibility = View.GONE }.start()
     }
 
     private fun boing() {
         bubble.animate().cancel()
-        bubble.scaleX = 1.18f; bubble.scaleY = 0.84f
-        bubble.animate().scaleX(1f).scaleY(1f).setDuration(420).setInterpolator(OvershootInterpolator(3f)).start()
+        bubble.scaleX = 0.94f; bubble.scaleY = 0.94f
+        bubble.animate().scaleX(1f).scaleY(1f).setDuration(160).setInterpolator(DecelerateInterpolator()).start()
     }
 
     private fun setupBubbleTouch() {
@@ -370,14 +369,14 @@ class AssistantOverlay(private val context: Context) {
         cursorParams.x = 0; cursorParams.y = 0
         cursor.translationX = m.widthPixels / 2f - cursorSize / 2f
         cursor.translationY = m.heightPixels * 0.45f - cursorSize / 2f
-        cursor.alpha = 0f; cursor.scaleX = 0.3f; cursor.scaleY = 0.3f
+        cursor.alpha = 0f; cursor.scaleX = 0.8f; cursor.scaleY = 0.8f
         runCatching { wm.addView(cursorLayer, cursorParams) }.onSuccess {
             cursorShown = true
             cursorLayer.post {
                 val loc = IntArray(2); cursorLayer.getLocationOnScreen(loc)
                 calibX = loc[0]; calibY = loc[1]
             }
-            cursor.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(260).setInterpolator(OvershootInterpolator(1.8f)).start()
+            cursor.animate().alpha(1f).scaleX(1f).scaleY(1f).setDuration(180).setInterpolator(DecelerateInterpolator()).start()
         }
     }
 
@@ -385,7 +384,7 @@ class AssistantOverlay(private val context: Context) {
         cursorAnim?.cancel()
         if (!cursorShown) return
         val remove = { if (cursorShown) { runCatching { wm.removeView(cursorLayer) }; cursorShown = false } }
-        if (immediate) remove() else cursor.animate().alpha(0f).scaleX(0.3f).scaleY(0.3f).setDuration(200).withEndAction(remove).start()
+        if (immediate) remove() else cursor.animate().alpha(0f).scaleX(0.8f).scaleY(0.8f).setDuration(200).withEndAction(remove).start()
     }
 
     private fun moveCursorTo(cx: Int, cy: Int) {
@@ -397,15 +396,14 @@ class AssistantOverlay(private val context: Context) {
         val dist = hypot(dx, dy)
         if (dist < 2f) return
         cursor.lookX = dx / dist; cursor.lookY = dy / dist
-        cursor.rotation = (dx / (dist + 1f)) * 12f
+        cursor.rotation = 0f
         cursorAnim = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = (170 + dist / density * 0.5f).toLong().coerceIn(170, 300)
             interpolator = DecelerateInterpolator(1.6f)
             addUpdateListener {
                 val f = it.animatedValue as Float
-                // Slight arc so it floats rather than slides.
-                cursor.translationX = fromX + dx * f
-                cursor.translationY = fromY + dy * f - dist * 0.12f * (4f * f * (1f - f))
+                                cursor.translationX = fromX + dx * f
+                cursor.translationY = fromY + dy * f
             }
             doOnEndCompat { cursor.animate().rotation(0f).setDuration(180).start(); cursor.lookX = 0f; cursor.lookY = 0f }
             start()
@@ -455,13 +453,13 @@ class AssistantOverlay(private val context: Context) {
         setImageResource(icon)
         contentDescription = label
         scaleType = ImageView.ScaleType.CENTER
-        setPadding(dp(9), dp(9), dp(9), dp(9))
+        setPadding(dp(13), dp(13), dp(13), dp(13))
         imageTintList = ColorStateList.valueOf(Color.WHITE)
         background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(color) }
-        elevation = dp(2).toFloat()
+        elevation = 0f
         setOnClickListener {
-            it.animate().scaleX(0.82f).scaleY(0.82f).setDuration(70).withEndAction {
-                it.animate().scaleX(1f).scaleY(1f).setDuration(160).setInterpolator(OvershootInterpolator(3f)).start()
+            it.animate().scaleX(0.92f).scaleY(0.92f).setDuration(60).withEndAction {
+                it.animate().scaleX(1f).scaleY(1f).setDuration(120).start()
             }.start()
             onClick()
         }
